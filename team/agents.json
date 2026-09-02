@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "team": "aigc-core",
+  "agents": [
+    {
+      "agent_id": "aigc-lead-codex",
+      "name": "AIGC Lead Codex",
+      "runtime": "codex",
+      "role": "orchestrator-and-integrator",
+      "write_scope": ["root configuration", "docs/architecture/", "approved cross-boundary changes"],
+      "capabilities": ["product direction", "architecture", "task decomposition", "integration", "release decisions"]
+    },
+    {
+      "agent_id": "aigc-build-codex",
+      "name": "AIGC Build Codex",
+      "runtime": "codex",
+      "role": "implementation-worker",
+      "write_scope": ["src/", "tests/", "implementation-owned documentation"],
+      "capabilities": ["implementation", "automated tests", "technical documentation"]
+    },
+    {
+      "agent_id": "aigc-product-omp",
+      "name": "AIGC Product OMP",
+      "runtime": "omp",
+      "role": "product-research-worker",
+      "write_scope": ["docs/product/", "research/"],
+      "capabilities": ["requirements", "research", "UX flows", "acceptance criteria"]
+    },
+    {
+      "agent_id": "aigc-quality-omp",
+      "name": "AIGC Quality OMP",
+      "runtime": "omp",
+      "role": "independent-reviewer",
+      "write_scope": ["docs/quality/"],
+      "capabilities": ["correctness review", "security review", "accessibility review", "release evidence"]
+    }
+  ]
+}
+

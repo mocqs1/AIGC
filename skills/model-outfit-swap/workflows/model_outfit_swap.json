@@ -1,0 +1,64 @@
+{
+  "name": "model_outfit_swap",
+  "skill": "model-outfit-swap",
+  "type": "image",
+  "provider": "hermes",
+  "provider_locked": false,
+  "providers": ["hermes", "hermes_volcano"],
+  "mode": "image_to_image",
+  "prompt_policy": "fixed_immutable_outfit_contract",
+  "model_family": "gpt-image-2",
+  "model_families": {
+    "hermes": "gpt-image-2",
+    "hermes_volcano": "doubao-seedream-5-0-pro-260628"
+  },
+  "provider_prompt_policies": {
+    "hermes": "gpt_image_2_clothing_only_source_locked_v1",
+    "hermes_volcano": "seedream_clothing_only_source_locked_v1"
+  },
+  "provider_prompt_policy": "gpt_image_2_clothing_only_source_locked_v1",
+  "accepts_custom_prompt": false,
+  "provider_constraints": {
+    "maximum_total_reference_images": 10,
+    "maximum_garment_images": 9,
+    "output_count": 1,
+    "preserve_model_aspect_ratio": true,
+    "garment_fidelity_standard": "exact_visual_match",
+    "fidelity_verification_status": "pending_manual_review",
+    "automatic_fidelity_guarantee": false
+  },
+  "steps": [
+    "validate_ordered_image_references",
+    "bind_first_reference_as_model",
+    "bind_later_references_as_outfits",
+    "build_outfit_swap_prompt",
+    "image_to_image_generation",
+    "save_output",
+    "quality_check"
+  ],
+  "resources": [],
+  "input": {
+    "minimum_references": 2,
+    "maximum_references": 10,
+    "first_reference": "model",
+    "subsequent_references": "outfit",
+    "reference_media_type": "image",
+    "order_is_semantic": true,
+    "source_assets_read_only": true
+  },
+  "output": {
+    "directory": "outputs/images/model_outfit_swap",
+    "prompt_file": "prompt.txt",
+    "extensions": [".png", ".jpg", ".jpeg", ".webp"]
+  },
+  "quality_checks": [
+    "adult model identity, face, hair, skin, pose, anatomy, and proportions are preserved",
+    "background, objects, lighting, shadows, camera, framing, crop, and aspect ratio are preserved",
+    "only the clothing region changes",
+    "every garment material, fiber or textile character, surface texture, weave or knit direction, thickness, opacity, stretch, compression, sheen, color, pattern, drape, silhouette, panel, seam, stitch, edge, strap, opening, hardware, lining, padding, label, and logo matches the references",
+    "fabric behavior and manufacturing evidence are compared at full-garment and close-up scale",
+    "ambiguous or hidden garment details are not invented, substituted, smoothed, or simplified",
+    "source assets remain unchanged",
+    "semantic preservation receives visual manual review"
+  ]
+}

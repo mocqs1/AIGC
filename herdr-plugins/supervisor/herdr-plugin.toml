@@ -1,0 +1,32 @@
+id = "aigc.supervisor"
+name = "AIGC Herdr Supervisor"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Keeps project agent tasks supervised across idle panes and context rotation"
+platforms = ["windows"]
+
+[[startup]]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "run.ps1", "start"]
+
+[[actions]]
+id = "status"
+title = "Show supervisor status"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "run.ps1", "status"]
+
+[[actions]]
+id = "reconcile"
+title = "Reconcile AIGC agents now"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "run.ps1", "reconcile"]
+
+[[actions]]
+id = "stop"
+title = "Stop supervisor process"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "run.ps1", "stop"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "run.ps1", "event"]
+

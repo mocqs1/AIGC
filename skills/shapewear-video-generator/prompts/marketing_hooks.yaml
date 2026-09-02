@@ -1,0 +1,19 @@
+version: 1
+purpose: short-form shapewear marketing hooks and calls to action
+hooks:
+  - id: fit_problem
+    text: "I wanted smoothing without giving up comfort."
+    use_when: comfort and fit are the main objections
+  - id: mirror_reveal
+    text: "The difference under this outfit surprised me."
+    use_when: visual silhouette reveal is available
+  - id: fabric_detail
+    text: "Look closely at the fabric and seamless edges."
+    use_when: material and construction are the product proof
+ctas:
+  - id: try_it
+    text: "Find your fit and try it today."
+  - id: shop_now
+    text: "Tap to shop the collection."
+  - id: learn_more
+    text: "See the details and choose your size."

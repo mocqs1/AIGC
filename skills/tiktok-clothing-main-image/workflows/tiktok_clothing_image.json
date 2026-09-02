@@ -1,0 +1,38 @@
+{
+  "name": "tiktok_clothing_image",
+  "skill": "tiktok-clothing-main-image",
+  "type": "image",
+  "provider": "hermes",
+  "provider_locked": false,
+  "providers": ["hermes", "hermes_volcano"],
+  "mode": "product_master_to_image",
+  "steps": [
+    "validate_product_master_and_same_product_details",
+    "build_source_locked_tiktok_prompt",
+    "image_to_image_generation",
+    "save_output",
+    "quality_check_and_manual_review"
+  ],
+  "input": {
+    "minimum_references": 1,
+    "maximum_references": 10,
+    "first_reference_role": "product_master",
+    "later_reference_role": "same_product_detail_or_alternate_view",
+    "reference_media_type": "image",
+    "source_assets_read_only": true,
+    "purposes": ["shop_listing", "photo_carousel", "video_cover", "ugc_variant"],
+    "styles": ["studio_detail", "creator_ugc"]
+  },
+  "output": {
+    "directory": "outputs/tiktok_clothing",
+    "prompt_file": "prompt.txt",
+    "default_aspect_ratio": "9:16",
+    "extensions": [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+  },
+  "quality_checks": [
+    "source garment identity and all visible colors and construction match",
+    "fabric and workmanship remain readable at thumbnail and 1:1 scale",
+    "product stays within the aspect-ratio safe area",
+    "copy and underwear or sleepwear presentation receive manual policy review"
+  ]
+}

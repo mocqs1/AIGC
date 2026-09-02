@@ -1,0 +1,7 @@
+# Runtime dependencies for the local AIGC Studio web interface.
+fastapi>=0.110,<1.0
+uvicorn>=0.29,<1.0
+boto3>=1.34,<2.0
+python-dotenv>=1.0,<2.0
+python-multipart>=0.0.9,<1.0
+cryptography>=42.0,<46.0

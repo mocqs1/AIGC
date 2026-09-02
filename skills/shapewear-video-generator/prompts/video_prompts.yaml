@@ -1,0 +1,31 @@
+version: 1
+purpose: shapewear video prompt structures
+prompts:
+  - id: luxury_brand
+    label: Luxury Brand
+    duration_seconds: 10
+    aspect_ratio: "9:16"
+    scene: luxury fashion studio
+    camera: slow cinematic movement, smooth push-in and restrained lateral track
+    action: model walks, touches fabric, and shows waist shaping with natural motion
+    prompt: >-
+      luxury shapewear fashion commercial, {product} in {color}, {scene},
+      {style}; slow cinematic movement; adult model walks, touches the fabric,
+      and demonstrates the silhouette; highlight {material} texture and seamless
+      construction; elegant lighting, temporal continuity, 10-second vertical
+      9:16 ad
+
+  - id: tiktok_ugc
+    label: TikTok UGC
+    duration_seconds: 10
+    aspect_ratio: "9:16"
+    hook: "I can't believe this shapewear fits like this."
+    scene: bedroom mirror selfie
+    camera: handheld iPhone, authentic small movements, eye-level framing
+    action: before and after comparison, fit demonstration, close-up detail, CTA
+    prompt: >-
+      TikTok UGC shapewear review, hook "I can't believe this shapewear fits like
+      this", adult creator in a bedroom mirror selfie, {product} in {color},
+      natural handheld iPhone camera, before-and-after styling comparison, clear
+      fit and fabric detail, honest social-commercial pacing, vertical 9:16,
+      10-second video

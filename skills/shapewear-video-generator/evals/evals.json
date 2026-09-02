@@ -1,0 +1,38 @@
+{
+  "skill_name": "shapewear-video-generator",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "生成一个黑色高腰塑身衣美国 TikTok 广告，10 秒，竖屏，先讲痛点再展示面料和穿着效果，最后给 CTA。",
+      "expected_output": "A 9:16 ten-second video workflow using a hook, product demonstration, detail, and CTA, with a quality checklist and output path contract.",
+      "files": [],
+      "expectations": [
+        "Uses the shapewear-video-generator skill and tiktok_10s template",
+        "Includes product, duration, 9:16 framing, hook, demonstration, detail, and CTA",
+        "Does not claim TikTok publishing or guaranteed medical/body outcomes"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "为黑色无痕塑身衣生成一张高级卧室商品宣传图，突出压缩面料、接缝和腰部结构。",
+      "expected_output": "A product-led image workflow using luxury or product_detail prompts and the image quality gate.",
+      "files": [],
+      "expectations": [
+        "Selects an image workflow and a relevant prompt block",
+        "Calls out fabric, seams, construction, scene, and lighting",
+        "Returns a local output path or clearly reports provider failure"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Create a 10-second adult model try-on video for a beige bodysuit in a premium bedroom, using a minimal editorial aesthetic and an existing keyframe.",
+      "expected_output": "An image-to-video workflow that preserves garment continuity and uses safe, non-explicit fashion direction.",
+      "files": [],
+      "expectations": [
+        "Uses video_prompts.yaml and passes the keyframe to image-to-video",
+        "Keeps the adult model fully covered and the garment prominent",
+        "Runs video semantic checks for warping, continuity, and vertical framing"
+      ]
+    }
+  ]
+}

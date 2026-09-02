@@ -1,0 +1,218 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "intelligent-editing",
+      "display_name": "Intelligent Editing",
+      "skill_file": "skills/intelligent-editing/SKILL.md",
+      "triggers": [
+        "智能剪辑",
+        "智能混剪",
+        "intelligent editing",
+        "edit plan",
+        "timeline trim",
+        "FFmpeg mix",
+        "resume edit"
+      ],
+      "qualification_rules": {
+        "edit plan": ["asset", "clip", "timeline", "render"],
+        "FFmpeg mix": ["image", "video", "clip"]
+      },
+      "entrypoints": {
+        "plan": "skills.intelligent_editing.runtime.planner_payload",
+        "validate": "skills.intelligent_editing.runtime.validate_plan",
+        "harness": "harness.intelligent_editing.runner.IntelligentEditingHarness"
+      },
+      "output_root": "outputs/videos"
+    },
+    {
+      "name": "shapewear-video-generator",
+      "display_name": "Shapewear Video Generator",
+      "skill_file": "skills/shapewear-video-generator/SKILL.md",
+      "triggers": [
+        "塑身衣",
+        "shapewear",
+        "bodysuit",
+        "waist trainer",
+        "lingerie advertisement",
+        "fashion commercial",
+        "shapewear product image",
+        "shapewear catalog image",
+        "shapewear fabric detail",
+        "塑身衣商品图",
+        "塑身衣产品图",
+        "塑身衣面料展示",
+        "塑身衣细节图"
+      ],
+      "image_provider": "hermes",
+      "image_provider_locked": false,
+      "image_providers": ["hermes", "hermes_volcano"],
+      "entrypoints": {
+        "image": "skills.shapewear_video_generator.runtime.generate_image",
+        "video": "skills.shapewear_video_generator.runtime.generate_video",
+        "batch_plan": "skills.shapewear_video_generator.batch.plan_batch",
+        "batch_validate": "skills.shapewear_video_generator.batch.validate_batch",
+        "batch_manifest": "skills.shapewear_video_generator.batch.batch_manifest",
+        "batch_harness": "harness.intelligent_editing.shapewear_batch.ShapewearBatchHarness"
+      },
+      "qualification_rules": {
+        "lingerie advertisement": ["shapewear", "bodysuit", "waist trainer"],
+        "fashion commercial": ["shapewear", "bodysuit", "waist trainer"],
+        "shapewear product image": ["shapewear", "bodysuit", "waist trainer"],
+        "shapewear catalog image": ["shapewear", "bodysuit", "waist trainer"],
+        "shapewear fabric detail": ["shapewear", "bodysuit", "waist trainer"]
+      },
+      "output_root": "outputs/shapewear"
+    },
+    {
+      "name": "model-outfit-swap",
+      "display_name": "Model Outfit Swap",
+      "skill_file": "skills/model-outfit-swap/SKILL.md",
+      "provider": "hermes",
+      "provider_locked": false,
+      "providers": ["hermes", "hermes_volcano"],
+      "triggers": [
+        "model outfit swap",
+        "model clothing swap",
+        "virtual try-on",
+        "virtual try on",
+        "outfit replacement",
+        "wardrobe replacement",
+        "模特换衣",
+        "模特换装",
+        "面料还原换装",
+        "服装工艺还原",
+        "garment detail matching",
+        "fabric fidelity try-on"
+      ],
+      "entrypoints": {
+        "image": "skills.model_outfit_swap.runtime.generate_image",
+        "harness": "harness.model_outfit_swap.ModelOutfitSwapHarness",
+        "validate": "harness.model_outfit_swap.validate_outfit_selection",
+        "build_request": "harness.model_outfit_swap.build_outfit_request"
+      },
+      "qualification_rules": {
+        "virtual try-on": ["model", "outfit"],
+        "outfit replacement": ["model", "garment"]
+      },
+      "output_root": "outputs/images/model_outfit_swap"
+    },
+    {
+      "name": "clothing-image-to-image",
+      "display_name": "Clothing Image to Image",
+      "skill_file": "skills/clothing-image-to-image/SKILL.md",
+      "provider": "hermes",
+      "provider_locked": true,
+      "triggers": [
+        "服装图生图",
+        "服装工艺图",
+        "服装细节图",
+        "clothing image to image",
+        "garment detail image",
+        "fabric detail image"
+      ],
+      "entrypoints": {
+        "image": "skills.clothing_image_to_image.runtime.generate_image",
+        "validate": "skills.clothing_image_to_image.runtime.ClothingImageRequestError"
+      },
+      "qualification_rules": {
+        "服装图生图": ["服装图", "服装图片"],
+        "garment detail image": ["garment", "reference image"]
+      },
+      "output_root": "outputs/clothing_image"
+    },
+    {
+      "name": "tiktok-clothing-main-image",
+      "display_name": "TikTok Clothing Main Image",
+      "skill_file": "skills/tiktok-clothing-main-image/SKILL.md",
+      "provider": "hermes",
+      "provider_locked": false,
+      "providers": ["hermes", "hermes_volcano"],
+      "triggers": [
+        "TikTok clothing product image",
+        "TikTok Shop clothing image",
+        "TikTok apparel main image",
+        "TikTok underwear product image",
+        "TikTok sleepwear product image",
+        "服装商品主图",
+        "TikTok服装主图",
+        "TikTok内衣商品图",
+        "TikTok睡衣商品图",
+        "clothing product main image",
+        "apparel fabric detail for TikTok"
+      ],
+      "entrypoints": {
+        "image": "skills.tiktok_clothing_main_image.runtime.generate_image",
+        "prompt": "skills.tiktok_clothing_main_image.runtime.build_prompt",
+        "quality": "skills.tiktok_clothing_main_image.quality_check.check_artifact"
+      },
+      "qualification_rules": {
+        "TikTok clothing product image": ["TikTok", "clothing", "product image"],
+        "TikTok Shop clothing image": ["TikTok Shop", "clothing", "image"],
+        "TikTok underwear product image": ["TikTok", "underwear", "product image"],
+        "clothing product main image": ["clothing", "master image", "reference image"]
+      },
+      "output_root": "outputs/tiktok_clothing"
+    },
+    {
+      "name": "mono-color-poster",
+      "display_name": "Mono-color Editorial Poster",
+      "provider_locked": false,
+      "triggers": [
+        "单色海报",
+        "双色海报",
+        "单色调视觉",
+        "孔版印刷海报",
+        "risograph poster",
+        "monochrome editorial poster",
+        "duotone print",
+        "zine poster",
+        "mono-color poster"
+      ],
+      "entrypoints": {
+        "image": "skills.mono_color_poster.runtime.generate_image",
+        "prompt": "skills.mono_color_poster.runtime.build_prompt",
+        "quality": "skills.mono_color_poster.quality_check.check_artifact"
+      },
+      "qualification_rules": {
+        "单色海报": ["海报"],
+        "duotone print": ["poster", "print"]
+      },
+      "output_root": "outputs/posters"
+    },
+    {
+      "name": "aigc-production-orchestrator",
+      "display_name": "AIGC Production Orchestrator",
+      "skill_file": "skills/aigc-production-orchestrator/SKILL.md",
+      "triggers": [
+        "AIGC 工作流",
+        "AIGC production",
+        "生成工作流",
+        "图片生成",
+        "视频生成",
+        "提示词工作流",
+        "批量生成",
+        "断点续跑",
+        "资产连续性",
+        "质量检查",
+        "manual review",
+        "resumable production"
+      ],
+      "entrypoints": {
+        "registry": "skills/registry.json",
+        "image": "main.generate_image",
+        "video": "main.generate_video",
+        "editing": "harness.intelligent_editing.runner.IntelligentEditingHarness"
+      },
+      "qualification_rules": {
+        "图片生成": ["图片", "生成"],
+        "视频生成": ["视频", "生成"],
+        "批量生成": ["批量", "生成"],
+        "断点续跑": ["继续", "任务"],
+        "资产连续性": ["参考图", "一致性"],
+        "质量检查": ["输出", "检查"]
+      },
+      "output_root": "outputs"
+    }
+  ]
+}

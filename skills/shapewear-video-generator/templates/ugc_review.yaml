@@ -1,0 +1,10 @@
+name: ugc_review
+duration_seconds: 10
+aspect_ratio: "9:16"
+tone: authentic, conversational, lightly edited
+beats:
+  - "open with a specific fit or comfort hook"
+  - "show the garment in a mirror or natural room"
+  - "include one close detail and a direct CTA"
+camera: handheld iPhone look, eye-level framing, natural room light
+copy_rule: label subjective experience as personal; do not present medical outcomes as facts

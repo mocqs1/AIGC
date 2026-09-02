@@ -1,0 +1,35 @@
+{
+  "name": "shapewear_video",
+  "skill": "shapewear-video-generator",
+  "type": "video",
+  "provider": "veo",
+  "steps": [
+    "input",
+    "product_analysis",
+    "prompt_generation",
+    "image_generation",
+    "image_to_video",
+    "save_output"
+  ],
+  "resources": [
+    "prompts/video_prompts.yaml",
+    "prompts/marketing_hooks.yaml",
+    "templates/tiktok_10s.yaml"
+  ],
+  "defaults": {
+    "duration_seconds": 10,
+    "aspect_ratio": "9:16",
+    "mode": "image_to_video"
+  },
+  "output": {
+    "directory": "outputs/shapewear",
+    "prompt_file": "prompt.txt",
+    "extensions": [".mp4", ".webm", ".mov", ".m4v"]
+  },
+  "quality_checks": [
+    "product remains prominent",
+    "no garment or anatomy warping",
+    "advertising beats are coherent",
+    "vertical 9:16 framing is TikTok-ready"
+  ]
+}

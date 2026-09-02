@@ -1,0 +1,25 @@
+id = "aigc.anti-loop"
+name = "AIGC Anti-Loop Guard"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Bounded budgets, progress detection, and dependency-cycle protection for AIGC agent teams"
+platforms = ["windows"]
+
+[[startup]]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "run.ps1", "status"]
+
+[[actions]]
+id = "status"
+title = "Show anti-loop status"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "run.ps1", "status"]
+
+[[actions]]
+id = "sweep"
+title = "Detect dependency cycles"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "run.ps1", "sweep"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "run.ps1", "event"]

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "workspace": "AIGC",
+  "topology": "one existing lead pane plus three sibling panes",
+  "panes": [
+    {
+      "key": "lead",
+      "agent_id": "aigc-lead-codex",
+      "runtime": "codex",
+      "created_by": "existing-session"
+    },
+    {
+      "key": "build",
+      "agent_id": "aigc-build-codex",
+      "runtime": "codex",
+      "created_by": "new-pane",
+      "split_direction": "right"
+    },
+    {
+      "key": "product",
+      "agent_id": "aigc-product-omp",
+      "runtime": "omp",
+      "created_by": "new-pane",
+      "split_direction": "down"
+    },
+    {
+      "key": "quality",
+      "agent_id": "aigc-quality-omp",
+      "runtime": "omp",
+      "created_by": "new-pane",
+      "split_direction": "down"
+    }
+  ]
+}
+

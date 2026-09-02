@@ -1,0 +1,37 @@
+{
+  "skill_name": "intelligent-editing",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "用我已导入的 4 个产品图片和视频做一个 12 秒竖屏智能混剪，先预览剪辑计划，我确认后再渲染；素材要能重复复用。",
+      "expected_output": "A preview-first, non-destructive intelligent-editing workflow with bounded clips, a plan hash, explicit confirmation, and local fallback.",
+      "files": [],
+      "expectations": [
+        "Uses only selected managed asset IDs and preserves sources",
+        "Shows plan timing, transitions, warnings, planner, and plan hash before render",
+        "Requires explicit confirmation before submitting the mix"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "上次智能剪辑服务重启了，请按原来的计划安全恢复，不要重复生成输出，也不要修改原素材。",
+      "expected_output": "A resumable/idempotent recovery workflow that checks stored request and plan fingerprints before polling or submitting.",
+      "files": [],
+      "expectations": [
+        "Reuses matching durable state and idempotency key",
+        "Does not submit a second render for an existing mix ID",
+        "Reports a stable recovery error when fingerprints do not match"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "请把这个视频剪辑需求写成一个可执行的通用计划，但不要调用任何 API 或渲染。",
+      "expected_output": "Routes to plan-preview only and does not claim that a render or provider call occurred.",
+      "files": [],
+      "expectations": [
+        "Separates plan creation from rendering",
+        "Does not invent media paths, provider results, or output URLs"
+      ]
+    }
+  ]
+}

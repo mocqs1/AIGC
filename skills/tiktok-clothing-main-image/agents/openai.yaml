@@ -1,0 +1,4 @@
+interface:
+  display_name: "TikTok Clothing Main Image"
+  short_description: "Generate source-locked TikTok clothing product images"
+  default_prompt: "Create a TikTok clothing product image from the supplied master garment image, preserving every visible color, fabric, and construction detail."

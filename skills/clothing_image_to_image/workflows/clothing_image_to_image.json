@@ -1,0 +1,32 @@
+{
+  "name": "clothing_image_to_image",
+  "skill": "clothing-image-to-image",
+  "type": "image",
+  "provider": "hermes",
+  "mode": "image_to_image",
+  "steps": [
+    "validate_single_garment_reference",
+    "build_immutable_garment_prompt",
+    "image_to_image_generation",
+    "save_output",
+    "quality_check"
+  ],
+  "input": {
+    "minimum_references": 1,
+    "maximum_references": 1,
+    "reference_role": "garment_source",
+    "reference_media_type": "image",
+    "source_assets_read_only": true
+  },
+  "output": {
+    "directory": "outputs/clothing_image",
+    "prompt_file": "prompt.txt",
+    "extensions": [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+  },
+  "quality_checks": [
+    "garment color and all visible product details match the source",
+    "fabric, construction, seams, and functional details remain inspectable",
+    "presentation does not crop, occlude, or distort the garment",
+    "semantic fidelity receives visual manual review"
+  ]
+}

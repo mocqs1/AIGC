@@ -1,0 +1,3 @@
+interface:
+  display_name: "Clothing Image to Image"
+  short_description: "Generate Hermes-bound garment-detail images from one clothing reference"

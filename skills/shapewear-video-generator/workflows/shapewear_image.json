@@ -1,0 +1,53 @@
+{
+  "name": "shapewear_image",
+  "skill": "shapewear-video-generator",
+  "type": "image",
+  "provider": "hermes",
+  "provider_locked": false,
+  "providers": ["hermes", "hermes_volcano"],
+  "mode": "text_to_image_or_reference_guided",
+  "prompt_policy": "exact_shapewear_product_fidelity",
+  "provider_prompt_policies": {
+    "hermes": "gpt_image_2_source_locked_product_fidelity_v1",
+    "hermes_volcano": "seedream_source_locked_product_fidelity_v2"
+  },
+  "accepts_custom_prompt": true,
+  "provider_constraints": {
+    "model_family": "Hermes-compatible image endpoint",
+    "model_families": {
+      "hermes": "gpt-image-2",
+      "hermes_volcano": "doubao-seedream-5-0-pro-260628"
+    },
+    "maximum_total_reference_images": 10,
+    "output_count": 1,
+    "garment_fidelity_standard": "exact_visual_match",
+    "fidelity_verification_status": "pending_manual_review",
+    "automatic_fidelity_guarantee": false
+  },
+  "steps": [
+    "validate_product_brief_and_references",
+    "bind_product_reference_as_source_of_truth",
+    "analyze_declared_fabric_and_construction",
+    "build_immutable_shapewear_product_prompt",
+    "provider_adaptive_image_generation",
+    "save_output",
+    "quality_check"
+  ],
+  "resources": [
+    "prompts/image_prompts.yaml"
+  ],
+  "output": {
+    "directory": "outputs/shapewear",
+    "prompt_file": "prompt.txt",
+    "extensions": [".png", ".jpg", ".jpeg", ".webp"]
+  },
+  "quality_checks": [
+    "full garment is centered and not cropped at key construction points",
+    "silhouette, rise, compression zones, panels, gusset, straps, openings, and closures match the source or declared attributes",
+    "fiber, weave or knit direction, thickness, opacity, stretch, compression, recovery, sheen, and drape are visually plausible",
+    "seams, stitch type and spacing, hems, bindings, bonded or laser-cut edges, elastics, grippers, bartacks, labels, logos, and hardware match",
+    "no detail was recolored, redesigned, simplified, invented, or replaced; ambiguous source areas remain manual review",
+    "adult model anatomy is natural and body shape is not altered",
+    "semantic exact-match fidelity receives visual manual review"
+  ]
+}

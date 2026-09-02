@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aigc.local/schemas/intelligent-editing-v1.json",
+  "title": "AIGC Intelligent Editing Contracts",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/plan" },
+    { "$ref": "#/$defs/runState" }
+  ],
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "assetId": {
+      "type": "string",
+      "pattern": "^(images|videos|shapewear|clothing_image|imported)/[A-Za-z0-9._/-]+$",
+      "not": {
+        "pattern": "(?:^|/)(?:\\.|\\.\\.)(?:/|$)|[\\\\:?#%;&|`$<>]"
+      }
+    },
+    "trimBounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_ms", "end_ms"],
+      "properties": {
+        "start_ms": { "type": "integer", "minimum": 0, "maximum": 3600000 },
+        "end_ms": { "type": "integer", "minimum": 500, "maximum": 3600000 }
+      }
+    },
+    "selectedAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_id", "media_type"],
+      "properties": {
+        "asset_id": { "$ref": "#/$defs/assetId" },
+        "media_type": { "enum": ["image", "video"] },
+        "duration_ms": { "type": "integer", "minimum": 500, "maximum": 60000 },
+        "trim_bounds_ms": { "$ref": "#/$defs/trimBounds" },
+        "size_bucket": { "type": ["string", "integer"] },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "selected_assets",
+        "objective",
+        "aspect_ratio",
+        "target_duration_ms"
+      ],
+      "properties": {
+        "request_id": { "$ref": "#/$defs/opaqueId" },
+        "idempotency_key": { "$ref": "#/$defs/opaqueId" },
+        "selected_assets": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/selectedAsset" }
+        },
+        "objective": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "aspect_ratio": { "enum": ["portrait", "landscape", "square"] },
+        "target_duration_ms": { "type": "integer", "minimum": 1000, "maximum": 300000 },
+        "transition_mode": { "enum": ["auto", "hard_cut", "fade"] },
+        "planner": { "enum": ["auto", "local", "codex_terra"] },
+        "image_duration_ms": { "type": "integer", "minimum": 500, "maximum": 60000 }
+      }
+    },
+    "planClip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_id", "start_ms", "end_ms", "duration_ms", "transition"],
+      "properties": {
+        "asset_id": { "$ref": "#/$defs/assetId" },
+        "start_ms": { "type": "integer", "minimum": 0, "maximum": 3600000 },
+        "end_ms": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 500, "maximum": 3600000 }
+          ]
+        },
+        "duration_ms": { "type": "integer", "minimum": 500, "maximum": 60000 },
+        "transition": { "const": "hard_cut" }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "objective",
+        "target_duration_ms",
+        "clips",
+        "planner",
+        "transition_mode",
+        "warnings"
+      ],
+      "properties": {
+        "version": { "const": "aigc-mix-plan/v1" },
+        "objective": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "target_duration_ms": { "type": "integer", "minimum": 1000, "maximum": 300000 },
+        "clips": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/planClip" }
+        },
+        "planner": { "enum": ["local", "codex_terra"] },
+        "transition_mode": { "enum": ["auto", "hard_cut", "fade"] },
+        "warnings": {
+          "type": "array",
+          "maxItems": 10,
+          "items": { "type": "string", "maxLength": 500 }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "request_id",
+        "input_fingerprint",
+        "selected_asset_ids",
+        "planner_requested",
+        "planner_used",
+        "plan_hash",
+        "warnings",
+        "stage"
+      ],
+      "properties": {
+        "version": { "const": "aigc-mix-plan/v1" },
+        "request_id": { "$ref": "#/$defs/opaqueId" },
+        "input_fingerprint": { "$ref": "#/$defs/sha256" },
+        "selected_asset_ids": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/assetId" }
+        },
+        "planner_requested": { "enum": ["auto", "local", "codex_terra"] },
+        "planner_used": { "enum": ["local", "codex_terra"] },
+        "plan_hash": { "$ref": "#/$defs/sha256" },
+        "accepted_plan_hash": { "$ref": "#/$defs/sha256" },
+        "warnings": {
+          "type": "array",
+          "maxItems": 10,
+          "items": { "type": "string", "maxLength": 500 }
+        },
+        "stage": {
+          "enum": ["previewed", "confirmed", "submitted", "queued", "running", "succeeded", "failed"]
+        },
+        "mix_id": { "$ref": "#/$defs/opaqueId" },
+        "output_asset": {
+          "type": "string",
+          "pattern": "^/api/assets/(images|videos|shapewear|clothing_image|imported)/[A-Za-z0-9._/-]+$"
+        },
+        "error": { "const": "混剪任务失败，请检查素材编码和文件完整性" }
+      }
+    },
+    "runState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "request_id",
+        "request",
+        "input_fingerprint",
+        "idempotency_key",
+        "stage",
+        "status",
+        "planner",
+        "plan",
+        "plan_hash",
+        "accepted_plan_hash",
+        "mix_id",
+        "output",
+        "error",
+        "evidence",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "version": { "const": "aigc-intelligent-editing-run/v1" },
+        "request_id": { "$ref": "#/$defs/opaqueId" },
+        "request": { "$ref": "#/$defs/request" },
+        "input_fingerprint": { "$ref": "#/$defs/sha256" },
+        "idempotency_key": { "$ref": "#/$defs/opaqueId" },
+        "stage": {
+          "enum": ["previewed", "confirmed", "submitted", "queued", "running", "succeeded", "failed"]
+        },
+        "status": {
+          "enum": ["awaiting_confirmation", "submitted", "queued", "running", "succeeded", "failed"]
+        },
+        "planner": { "enum": ["local", "codex_terra"] },
+        "plan": { "$ref": "#/$defs/plan" },
+        "plan_hash": { "$ref": "#/$defs/sha256" },
+        "accepted_plan_hash": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        },
+        "mix_id": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/opaqueId" }]
+        },
+        "output": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^/api/assets/(images|videos|shapewear|clothing_image|imported)/[A-Za-z0-9._/-]+$" }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message"],
+              "properties": {
+                "code": { "const": "mix_failed" },
+                "message": { "const": "混剪任务失败，请检查素材编码和文件完整性" }
+              }
+            }
+          ]
+        },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

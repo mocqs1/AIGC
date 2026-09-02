@@ -1,0 +1,10 @@
+name: luxury_brand
+duration_seconds: 10
+aspect_ratio: "9:16"
+tone: minimal, premium, editorial, restrained
+beats:
+  - "establish the garment and silhouette"
+  - "reveal fabric texture and construction"
+  - "finish with a quiet product-led CTA"
+camera: slow push-in, smooth lateral track, stable exposure and continuity
+copy_rule: use short factual product language; avoid unsupported body or health claims

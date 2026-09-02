@@ -1,0 +1,10 @@
+{
+  "name": "mono_color_poster",
+  "display_name": "Mono-color Editorial Poster",
+  "type": "image",
+  "provider": "hermes",
+  "provider_locked": false,
+  "reference_images": {"min": 0, "max": 1, "role": "optional subject source"},
+  "output_root": "outputs/posters",
+  "prompt_policy": "deterministic_mono_color_editorial_contract"
+}

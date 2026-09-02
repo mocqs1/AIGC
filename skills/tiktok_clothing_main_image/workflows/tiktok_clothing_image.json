@@ -1,0 +1,9 @@
+{
+  "name": "tiktok_clothing_image",
+  "skill": "tiktok-clothing-main-image",
+  "type": "image",
+  "provider": "hermes",
+  "provider_locked": false,
+  "providers": ["hermes", "hermes_volcano"],
+  "output_root": "outputs/tiktok_clothing"
+}

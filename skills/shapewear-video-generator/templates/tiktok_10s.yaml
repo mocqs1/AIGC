@@ -1,0 +1,14 @@
+name: tiktok_10s
+duration_seconds: 10
+aspect_ratio: "9:16"
+safe_margins: "keep captions and CTA clear of top/bottom platform chrome"
+timeline:
+  - time: "0-3s"
+    beat: problem_hook
+    direction: show the outfit problem or opening fit concern immediately
+  - time: "3-7s"
+    beat: product_demonstration
+    direction: show garment construction, fit, and one clear movement
+  - time: "7-10s"
+    beat: result_cta
+    direction: show the finished silhouette, one proof detail, and a readable CTA

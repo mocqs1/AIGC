@@ -1,0 +1,30 @@
+version: 2
+purpose: shapewear product image prompt blocks with exact material and construction fidelity
+prompts:
+  - id: luxury_fashion
+    label: Luxury Fashion
+    prompt: >-
+      premium shapewear catalog advertisement, adult fully covered fashion model
+      wearing {product} in {color}, controlled luxury studio lighting, refined
+      editorial composition, natural fashion pose, single product hero, realistic
+      skin and textile rendering, garment shown at a useful full-product scale
+    use_when: controlled studio, premium editorial, or luxury brand brief
+
+  - id: tiktok_ugc
+    label: TikTok UGC
+    prompt: >-
+      authentic product demonstration, adult fully covered woman showing {product}
+      in {color}, natural {scene} environment, realistic phone-camera perspective,
+      soft directional window light, believable fit demonstration, stable readable
+      garment silhouette, no beauty-filter blur, lightly edited vertical social
+      commerce frame
+    use_when: creator testimonial, mirror selfie, or native social brief
+
+  - id: product_detail
+    label: Product Detail
+    prompt: >-
+      high-resolution product detail photograph of {product} in {color}, {material}
+      compression textile, product-only or mannequin presentation, calibrated
+      macro close-up of the fabric and construction, controlled highlights, crisp
+      edge detail, tactile commercial material study, clean neutral background
+    use_when: fabric, seam, construction, or material-focused brief
