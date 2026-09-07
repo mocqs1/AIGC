@@ -74,6 +74,52 @@ class RuntimeBootstrapTests(unittest.TestCase):
             major, minor = (int(part) for part in version.split("."))
             self.assertGreaterEqual((major, minor), (3, 11))
 
+    def test_missing_python_packages_install_instead_of_aborting_on_stderr(self):
+        command = r"""
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$python = (Get-Command python).Source
+$oldThrew = $false
+try {
+    & $python -c "import definitely_missing_aigc_pkg_xyz" 2>$null
+} catch {
+    $oldThrew = $true
+}
+if (-not $oldThrew) { throw 'expected PowerShell Stop to treat python stderr as a terminating error' }
+
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [object[]]$ArgumentList = @(),
+        [switch]$Quiet
+    )
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if ($Quiet) {
+            & $FilePath @ArgumentList 1>$null 2>&1 | Out-Null
+        }
+        else {
+            & $FilePath @ArgumentList
+        }
+        if ($null -eq $LASTEXITCODE) { return 0 }
+        return [int]$LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previous }
+}
+function Test-PythonPackages {
+    param([Parameter(Mandatory)][string]$Python)
+    $probe = "import importlib.util, sys; mods=('fastapi','uvicorn','boto3','dotenv','multipart','cryptography'); sys.exit(0 if all(importlib.util.find_spec(name) for name in mods) else 1)"
+    return (Invoke-Native -FilePath $Python -ArgumentList @('-c', $probe) -Quiet) -eq 0
+}
+$missing = Invoke-Native -FilePath $python -ArgumentList @('-c', "import definitely_missing_aigc_pkg_xyz") -Quiet
+if ($missing -eq 0) { throw 'missing import should return non-zero' }
+'PROBE_OK'
+"""
+        result = _powershell("-Command", command)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PROBE_OK", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

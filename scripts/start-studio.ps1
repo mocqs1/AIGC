@@ -107,12 +107,48 @@ function Invoke-RuntimeEnsure {
 }
 
 
-function Assert-LastExitCode {
-    param([Parameter(Mandatory)][string]$Action)
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [object[]]$ArgumentList = @(),
+        [switch]$Quiet
+    )
 
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Action failed (exit code $LASTEXITCODE)."
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        if ($Quiet) {
+            & $FilePath @ArgumentList 1>$null 2>&1 | Out-Null
+        }
+        else {
+            & $FilePath @ArgumentList
+        }
+        if ($null -eq $LASTEXITCODE) {
+            return 0
+        }
+        return [int]$LASTEXITCODE
     }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Assert-LastExitCode {
+    param(
+        [Parameter(Mandatory)][string]$Action,
+        [int]$ExitCode = $LASTEXITCODE
+    )
+
+    if ($ExitCode -ne 0) {
+        throw "$Action failed (exit code $ExitCode)."
+    }
+}
+
+function Test-PythonPackages {
+    param([Parameter(Mandatory)][string]$Python)
+
+    $probe = "import importlib.util, sys; mods=('fastapi','uvicorn','boto3','dotenv','multipart','cryptography'); sys.exit(0 if all(importlib.util.find_spec(name) for name in mods) else 1)"
+    return (Invoke-Native -FilePath $Python -ArgumentList @("-c", $probe) -Quiet) -eq 0
 }
 
 if (Test-Path -LiteralPath $portPath) {
@@ -141,29 +177,24 @@ Write-Host "Using Python $($runtime.pythonVersion) at $python"
 Write-Host "Using Node.js $($runtime.nodeMajor) at $node"
 
 Write-Host "[2/4] Checking Python dependencies..."
-& $python -c "import fastapi, uvicorn, boto3, dotenv, multipart, cryptography" 2>$null
-if ($LASTEXITCODE -ne 0) {
+if (-not (Test-PythonPackages -Python $python)) {
     Write-Host "Installing Python dependencies..."
-    & $python -m pip install --upgrade pip
-    Assert-LastExitCode -Action "pip upgrade"
-    & $python -m pip install -r $requirementsPath
-    Assert-LastExitCode -Action "Python dependency installation"
-
-    & $python -c "import fastapi, uvicorn, boto3, dotenv, multipart, cryptography" 2>$null
-    Assert-LastExitCode -Action "Python dependency verification"
+    Assert-LastExitCode -Action "pip upgrade" -ExitCode (Invoke-Native -FilePath $python -ArgumentList @("-m", "pip", "install", "--upgrade", "pip"))
+    Assert-LastExitCode -Action "Python dependency installation" -ExitCode (Invoke-Native -FilePath $python -ArgumentList @("-m", "pip", "install", "-r", $requirementsPath))
+    if (-not (Test-PythonPackages -Python $python)) {
+        throw "Python dependency verification failed."
+    }
 }
 
 Write-Host "[3/4] Preparing the web application..."
-& $npm ls --prefix $webRoot --depth=0 2>$null | Out-Null
-if (-not (Test-Path -LiteralPath (Join-Path $webRoot "node_modules")) -or $LASTEXITCODE -ne 0) {
+$npmList = Invoke-Native -FilePath $npm -ArgumentList @("ls", "--prefix", $webRoot, "--depth=0") -Quiet
+if (-not (Test-Path -LiteralPath (Join-Path $webRoot "node_modules")) -or $npmList -ne 0) {
     Write-Host "Installing web dependencies..."
-    & $npm install --prefix $webRoot
-    Assert-LastExitCode -Action "Web dependency installation"
+    Assert-LastExitCode -Action "Web dependency installation" -ExitCode (Invoke-Native -FilePath $npm -ArgumentList @("install", "--prefix", $webRoot))
 }
 
 if (-not $Dev) {
-    & $npm run build --prefix $webRoot
-    Assert-LastExitCode -Action "Web application build"
+    Assert-LastExitCode -Action "Web application build" -ExitCode (Invoke-Native -FilePath $npm -ArgumentList @("run", "build", "--prefix", $webRoot))
 }
 
 Write-Host "[4/4] Starting AIGC Studio..."
@@ -207,8 +238,7 @@ else {
 if ($Dev) {
     Write-Host "Starting the development UI at http://127.0.0.1:5173"
     $env:AIGC_API_PORT = "$studioPort"
-    & $npm run dev --prefix $webRoot
-    Assert-LastExitCode -Action "Development UI"
+    Assert-LastExitCode -Action "Development UI" -ExitCode (Invoke-Native -FilePath $npm -ArgumentList @("run", "dev", "--prefix", $webRoot))
     exit 0
 }
 
