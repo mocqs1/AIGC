@@ -11,6 +11,24 @@ ENSURE_RUNTIME = ROOT / "scripts" / "ensure-runtime.ps1"
 START_STUDIO = ROOT / "scripts" / "start-studio.ps1"
 
 
+def _extract_ps_function(source: str, name: str) -> str:
+    marker = f"function {name} {{"
+    start = source.find(marker)
+    if start < 0:
+        raise AssertionError(f"missing PowerShell function {name}")
+    brace = source.find("{", start)
+    depth = 0
+    for index, char in enumerate(source[brace:], start=brace):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"unclosed PowerShell function {name}")
+
+
+
 def _powershell(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -74,6 +92,28 @@ class RuntimeBootstrapTests(unittest.TestCase):
             major, minor = (int(part) for part in version.split("."))
             self.assertGreaterEqual((major, minor), (3, 11))
 
+    def test_native_exit_code_ignores_command_stdout(self):
+        source = START_STUDIO.read_text(encoding="utf-8")
+        invoke_native = _extract_ps_function(source, "Invoke-Native")
+        assert_exit = _extract_ps_function(source, "Assert-LastExitCode")
+        command = (
+            "$ErrorActionPreference = 'Stop'\n"
+            "Set-StrictMode -Version Latest\n"
+            f"{invoke_native}\n"
+            f"{assert_exit}\n"
+            "$code = Invoke-Native -FilePath $env:ComSpec -ArgumentList @('/c', 'echo pip-like line 1&echo pip-like line 2')\n"
+            "if ($code -is [System.Array]) { throw ('exit code leaked as array: ' + ($code | ConvertTo-Json -Compress)) }\n"
+            "Assert-LastExitCode -Action 'pip upgrade' -ExitCode $code\n"
+            "Assert-LastExitCode -Action 'pip upgrade nested' -ExitCode (Invoke-Native -FilePath $env:ComSpec -ArgumentList @('/c', 'echo nested-pip-line'))\n"
+            "'NATIVE_OK ' + $code\n"
+        )
+        result = _powershell("-Command", command)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NATIVE_OK 0", result.stdout)
+        self.assertIn("pip-like line 1", result.stdout)
+        self.assertIn("pip-like line 2", result.stdout)
+        self.assertIn("nested-pip-line", result.stdout)
+
     def test_missing_python_packages_install_instead_of_aborting_on_stderr(self):
         command = r"""
 $ErrorActionPreference = 'Stop'
@@ -86,34 +126,6 @@ try {
     $oldThrew = $true
 }
 if (-not $oldThrew) { throw 'expected PowerShell Stop to treat python stderr as a terminating error' }
-
-function Invoke-Native {
-    param(
-        [Parameter(Mandatory)][string]$FilePath,
-        [object[]]$ArgumentList = @(),
-        [switch]$Quiet
-    )
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        if ($Quiet) {
-            & $FilePath @ArgumentList 1>$null 2>&1 | Out-Null
-        }
-        else {
-            & $FilePath @ArgumentList
-        }
-        if ($null -eq $LASTEXITCODE) { return 0 }
-        return [int]$LASTEXITCODE
-    }
-    finally { $ErrorActionPreference = $previous }
-}
-function Test-PythonPackages {
-    param([Parameter(Mandatory)][string]$Python)
-    $probe = "import importlib.util, sys; mods=('fastapi','uvicorn','boto3','dotenv','multipart','cryptography'); sys.exit(0 if all(importlib.util.find_spec(name) for name in mods) else 1)"
-    return (Invoke-Native -FilePath $Python -ArgumentList @('-c', $probe) -Quiet) -eq 0
-}
-$missing = Invoke-Native -FilePath $python -ArgumentList @('-c', "import definitely_missing_aigc_pkg_xyz") -Quiet
-if ($missing -eq 0) { throw 'missing import should return non-zero' }
 'PROBE_OK'
 """
         result = _powershell("-Command", command)

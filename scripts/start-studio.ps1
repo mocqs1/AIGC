@@ -117,16 +117,17 @@ function Invoke-Native {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        if ($Quiet) {
-            & $FilePath @ArgumentList 1>$null 2>&1 | Out-Null
+        $output = & $FilePath @ArgumentList 2>&1
+        $code = 0
+        if ($null -ne $LASTEXITCODE) {
+            $code = [int]$LASTEXITCODE
         }
-        else {
-            & $FilePath @ArgumentList
+        if (-not $Quiet) {
+            foreach ($line in @($output)) {
+                Write-Host ([string]$line)
+            }
         }
-        if ($null -eq $LASTEXITCODE) {
-            return 0
-        }
-        return [int]$LASTEXITCODE
+        return ,$code
     }
     finally {
         $ErrorActionPreference = $previous
@@ -136,11 +137,15 @@ function Invoke-Native {
 function Assert-LastExitCode {
     param(
         [Parameter(Mandatory)][string]$Action,
-        [int]$ExitCode = $LASTEXITCODE
+        $ExitCode = $LASTEXITCODE
     )
 
-    if ($ExitCode -ne 0) {
-        throw "$Action failed (exit code $ExitCode)."
+    if ($ExitCode -is [System.Array]) {
+        $ExitCode = $ExitCode[-1]
+    }
+    $code = [int]$ExitCode
+    if ($code -ne 0) {
+        throw "$Action failed (exit code $code)."
     }
 }
 
