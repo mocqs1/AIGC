@@ -11,11 +11,31 @@ or a hosted generation service.
 
 ## Download and install
 
-Clone this repository:
+On Windows, clone the repository and double-click `start-aigc.bat`. The
+launcher installs Python 3.11+ and Node.js 18+ when they are missing, creates
+a project virtual environment, installs Python and npm packages, builds the
+UI, and starts Studio.
 
 ```powershell
 git clone https://github.com/mocqs1/AIGC.git
 cd AIGC
+Copy-Item .env.example .env
+.\start-aigc.bat
+```
+
+Runtime bootstrap order:
+
+1. Reuse a usable Python 3.11+ or Node.js 18+ already on PATH.
+2. Install missing runtimes with `winget` (`Python.Python.3.12`, `OpenJS.NodeJS.LTS`).
+3. If `winget` is unavailable, download the official Python 3.12 and Node.js LTS installers.
+
+The Node.js MSI fallback may prompt for administrator approval. After a brand-new
+runtime install, if PATH is not refreshed in the current window, close it and
+run `start-aigc.bat` again.
+
+Manual setup is still available:
+
+```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -27,7 +47,7 @@ cd ..
 ```
 
 On macOS or Linux, activate the virtual environment with
-`source .venv/bin/activate`.
+`source .venv/bin/activate`. Automatic runtime installation is Windows-only.
 
 Requirements: Python 3.11+, Node.js 18+, npm, and a supported provider API
 key for the workflow you want to run.
@@ -61,10 +81,10 @@ On Windows, double-click `start-aigc.bat` or run:
 .\start-aigc.bat
 ```
 
-The launcher checks Python and Node.js, installs missing dependencies, builds
-the UI, starts the local API, and opens the studio. The default URL is
-`http://127.0.0.1:8000`; if that port is occupied, it selects an available
-port from 8001 through 8099.
+The launcher checks Python and Node.js, installs missing runtimes and
+dependencies, builds the UI, starts the local API, and opens the studio. The
+default URL is `http://127.0.0.1:8000`; if that port is occupied, it selects
+an available port from 8001 through 8099.
 
 Stop the managed server with:
 

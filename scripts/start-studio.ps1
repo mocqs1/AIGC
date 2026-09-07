@@ -80,18 +80,32 @@ function Open-Studio {
     }
 }
 
-function Assert-Command {
-    param(
-        [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][string]$InstallHint
-    )
-
-    $command = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $command) {
-        throw "$Name was not found. $InstallHint"
+function Invoke-RuntimeEnsure {
+    $ensureScript = Join-Path $PSScriptRoot "ensure-runtime.ps1"
+    if (-not (Test-Path -LiteralPath $ensureScript)) {
+        throw "Missing runtime bootstrap script: $ensureScript"
     }
-    return $command
+    $output = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $ensureScript -ProjectRoot $projectRoot 2>&1
+    $exitCode = $LASTEXITCODE
+    $jsonLine = $null
+    foreach ($line in @($output)) {
+        $text = [string]$line
+        if ($text -match '^\s*\{') {
+            $jsonLine = $text
+        }
+        else {
+            Write-Host $text
+        }
+    }
+    if ($exitCode -ne 0) {
+        throw "Runtime bootstrap failed (exit code $exitCode)."
+    }
+    if (-not $jsonLine) {
+        throw "Runtime bootstrap did not return a runtime description."
+    }
+    return $jsonLine | ConvertFrom-Json
 }
+
 
 function Assert-LastExitCode {
     param([Parameter(Mandatory)][string]$Action)
@@ -115,35 +129,40 @@ if (-not $Dev -and (Test-AigcStudio)) {
 }
 
 Write-Host "[1/4] Checking Python and Node.js..."
-$python = Assert-Command -Name "python" -InstallHint "Install Python 3.11 or newer and add it to PATH."
-Assert-Command -Name "node" -InstallHint "Install the Node.js LTS release and add it to PATH." | Out-Null
-Assert-Command -Name "npm" -InstallHint "Install the Node.js LTS release, which includes npm." | Out-Null
-& $python.Source -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
-Assert-LastExitCode -Action "Python 3.11+ version check"
-& node -e "const major=Number(process.versions.node.split('.')[0]); process.exit(major >= 18 ? 0 : 1)"
-Assert-LastExitCode -Action "Node.js 18+ version check"
+$runtime = Invoke-RuntimeEnsure
+$python = [string]$runtime.venvPython
+$node = [string]$runtime.node
+$npm = [string]$runtime.npm
+if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $node) -or -not (Test-Path -LiteralPath $npm)) {
+    throw "Runtime bootstrap returned missing Python, Node.js, or npm paths."
+}
+$env:Path = "$(Split-Path -Parent $node);$(Split-Path -Parent $python);$env:Path"
+Write-Host "Using Python $($runtime.pythonVersion) at $python"
+Write-Host "Using Node.js $($runtime.nodeMajor) at $node"
 
 Write-Host "[2/4] Checking Python dependencies..."
-& $python.Source -c "import fastapi, uvicorn, boto3, dotenv, multipart, cryptography" 2>$null
+& $python -c "import fastapi, uvicorn, boto3, dotenv, multipart, cryptography" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Installing Python dependencies..."
-    & $python.Source -m pip install -r $requirementsPath
+    & $python -m pip install --upgrade pip
+    Assert-LastExitCode -Action "pip upgrade"
+    & $python -m pip install -r $requirementsPath
     Assert-LastExitCode -Action "Python dependency installation"
 
-    & $python.Source -c "import fastapi, uvicorn, boto3, dotenv, multipart, cryptography" 2>$null
+    & $python -c "import fastapi, uvicorn, boto3, dotenv, multipart, cryptography" 2>$null
     Assert-LastExitCode -Action "Python dependency verification"
 }
 
 Write-Host "[3/4] Preparing the web application..."
-& npm ls --prefix $webRoot --depth=0 2>$null | Out-Null
+& $npm ls --prefix $webRoot --depth=0 2>$null | Out-Null
 if (-not (Test-Path -LiteralPath (Join-Path $webRoot "node_modules")) -or $LASTEXITCODE -ne 0) {
     Write-Host "Installing web dependencies..."
-    & npm install --prefix $webRoot
+    & $npm install --prefix $webRoot
     Assert-LastExitCode -Action "Web dependency installation"
 }
 
 if (-not $Dev) {
-    & npm run build --prefix $webRoot
+    & $npm run build --prefix $webRoot
     Assert-LastExitCode -Action "Web application build"
 }
 
@@ -154,7 +173,7 @@ if (-not (Test-AigcStudio)) {
     New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
     $stdoutLog = Join-Path $runtimeRoot "studio.stdout.log"
     $stderrLog = Join-Path $runtimeRoot "studio.stderr.log"
-    $server = Start-Process -FilePath $python.Source `
+    $server = Start-Process -FilePath $python `
         -ArgumentList "-m", "uvicorn", "api_server:app", "--host", "127.0.0.1", "--port", "$studioPort" `
         -WorkingDirectory $projectRoot `
         -WindowStyle Hidden `
@@ -188,7 +207,7 @@ else {
 if ($Dev) {
     Write-Host "Starting the development UI at http://127.0.0.1:5173"
     $env:AIGC_API_PORT = "$studioPort"
-    & npm run dev --prefix $webRoot
+    & $npm run dev --prefix $webRoot
     Assert-LastExitCode -Action "Development UI"
     exit 0
 }
