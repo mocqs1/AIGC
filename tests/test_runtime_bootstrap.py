@@ -152,6 +152,10 @@ if (-not $oldThrew) { throw 'expected PowerShell Stop to treat python stderr as 
             "$npmPlans = @(Get-NpmInstallPlans -WebRoot 'C:\\temp\\web')\n"
             "$npmNames = @($npmPlans | ForEach-Object { $_.name })\n"
             "if ($npmNames -notcontains 'npmmirror registry') { throw 'missing npm mirror fallback' }\n"
+            "foreach ($plan in $npmPlans) {\n"
+            "    if (@($plan.arguments) -contains '--prefix') { throw 'npm plans must not use --prefix' }\n"
+            "}\n"
+            "if (@($npmPlans[0].arguments) -notcontains 'install') { throw 'npm plans must run install in the web folder' }\n"
             "'PLANS_OK'\n"
         )
         result = _powershell("-Command", command)
@@ -179,6 +183,75 @@ if (-not $oldThrew) { throw 'expected PowerShell Stop to treat python stderr as 
         result = _powershell("-Command", command)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PROXY_OK", result.stdout)
+
+    def test_native_working_directory_supports_spaces_and_parentheses(self):
+        source = START_STUDIO.read_text(encoding="utf-8")
+        convert_line = _extract_ps_function(source, "Convert-NativeOutputLine")
+        invoke_native = _extract_ps_function(source, "Invoke-Native")
+        command = (
+            "$ErrorActionPreference = 'Stop'\n"
+            "Set-StrictMode -Version Latest\n"
+            f"{convert_line}\n"
+            f"{invoke_native}\n"
+            "$web = Join-Path $env:TEMP ('AIGC Native (' + [guid]::NewGuid().ToString('N').Substring(0,8) + ')')\n"
+            "New-Item -ItemType Directory -Path $web | Out-Null\n"
+            "Set-Content -LiteralPath (Join-Path $web 'marker.txt') -Value 'cwd-ok'\n"
+            "$before = (Get-Location).Path\n"
+            "try {\n"
+            "    $code = Invoke-Native -FilePath $env:ComSpec -ArgumentList @('/c', 'type marker.txt & cd') -WorkingDirectory $web\n"
+            "    if ($code -ne 0) { throw ('expected success, got ' + $code) }\n"
+            "}\n"
+            "finally {\n"
+            "    Remove-Item -LiteralPath $web -Recurse -Force\n"
+            "}\n"
+            "if ((Get-Location).Path -ne $before) { throw 'working directory leaked after Invoke-Native' }\n"
+            "'CWD_OK'\n"
+        )
+        result = _powershell("-Command", command)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CWD_OK", result.stdout)
+        self.assertIn("cwd-ok", result.stdout)
+
+    def test_npm_install_fails_fast_when_package_json_missing(self):
+        source = START_STUDIO.read_text(encoding="utf-8")
+        convert_line = _extract_ps_function(source, "Convert-NativeOutputLine")
+        invoke_native = _extract_ps_function(source, "Invoke-Native")
+        get_names = _extract_ps_function(source, "Get-ProxyEnvironmentNames")
+        without_proxy = _extract_ps_function(source, "Invoke-WithoutProxyEnv")
+        get_npm = _extract_ps_function(source, "Get-NpmInstallPlans")
+        invoke_plan = _extract_ps_function(source, "Invoke-InstallPlan")
+        install_npm = _extract_ps_function(source, "Install-NpmPackages")
+        command = (
+            "$ErrorActionPreference = 'Stop'\n"
+            "Set-StrictMode -Version Latest\n"
+            f"{convert_line}\n"
+            f"{invoke_native}\n"
+            f"{get_names}\n"
+            f"{without_proxy}\n"
+            f"{get_npm}\n"
+            f"{invoke_plan}\n"
+            f"{install_npm}\n"
+            "$web = Join-Path $env:TEMP ('AIGC Missing Web (' + [guid]::NewGuid().ToString('N').Substring(0,8) + ')')\n"
+            "New-Item -ItemType Directory -Path $web | Out-Null\n"
+            "try {\n"
+            "    $threw = $false\n"
+            "    try {\n"
+            "        Install-NpmPackages -Npm $env:ComSpec -WebRoot $web\n"
+            "    } catch {\n"
+            "        $threw = $true\n"
+            "        if ($_.Exception.Message -notmatch 'package.json') { throw ('unexpected error: ' + $_.Exception.Message) }\n"
+            "        if ($_.Exception.Message -notmatch [regex]::Escape($web)) { throw ('error did not name web root: ' + $_.Exception.Message) }\n"
+            "    }\n"
+            "    if (-not $threw) { throw 'expected missing package.json to fail fast' }\n"
+            "}\n"
+            "finally {\n"
+            "    Remove-Item -LiteralPath $web -Recurse -Force\n"
+            "}\n"
+            "'MISSING_PKG_OK'\n"
+        )
+        result = _powershell("-Command", command)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("MISSING_PKG_OK", result.stdout)
 
 
 if __name__ == "__main__":

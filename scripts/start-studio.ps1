@@ -118,12 +118,18 @@ function Invoke-Native {
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [object[]]$ArgumentList = @(),
+        [string]$WorkingDirectory,
         [switch]$Quiet
     )
 
     $previous = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
+    $pushed = $false
     try {
+        if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+            Push-Location -LiteralPath $WorkingDirectory
+            $pushed = $true
+        }
         $output = & $FilePath @ArgumentList 2>&1
         $code = 0
         if ($null -ne $LASTEXITCODE) {
@@ -140,6 +146,9 @@ function Invoke-Native {
         return ,$code
     }
     finally {
+        if ($pushed) {
+            Pop-Location
+        }
         $ErrorActionPreference = $previous
     }
 }
@@ -244,17 +253,17 @@ function Get-NpmInstallPlans {
         [ordered]@{
             name = "current network"
             clearProxy = $false
-            arguments = @("install", "--prefix", $WebRoot)
+            arguments = @("install")
         },
         [ordered]@{
             name = "direct connection"
             clearProxy = $true
-            arguments = @("install", "--prefix", $WebRoot)
+            arguments = @("install")
         },
         [ordered]@{
             name = "npmmirror registry"
             clearProxy = $true
-            arguments = @("install", "--prefix", $WebRoot, "--registry", "https://registry.npmmirror.com")
+            arguments = @("install", "--registry", "https://registry.npmmirror.com")
         }
     )
 }
@@ -263,14 +272,15 @@ function Invoke-InstallPlan {
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [Parameter(Mandatory)]$Plan,
-        [object[]]$ArgumentList
+        [object[]]$ArgumentList,
+        [string]$WorkingDirectory
     )
 
     Write-Host "Trying $($Plan.name)..."
     if ($Plan.clearProxy) {
-        return Invoke-WithoutProxyEnv { Invoke-Native -FilePath $FilePath -ArgumentList $ArgumentList }
+        return Invoke-WithoutProxyEnv { Invoke-Native -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory }
     }
-    return Invoke-Native -FilePath $FilePath -ArgumentList $ArgumentList
+    return Invoke-Native -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory
 }
 
 function Install-PythonPackages {
@@ -297,15 +307,20 @@ function Install-NpmPackages {
         [Parameter(Mandatory)][string]$WebRoot
     )
 
+    $packageJson = Join-Path $WebRoot "package.json"
+    if (-not (Test-Path -LiteralPath $packageJson)) {
+        throw "Web application is missing. Expected package.json at $packageJson. Unpack the full AIGC repository so the web folder is next to start-aigc.bat."
+    }
+
     foreach ($plan in Get-NpmInstallPlans -WebRoot $WebRoot) {
-        $code = Invoke-InstallPlan -FilePath $Npm -Plan $plan -ArgumentList @($plan.arguments)
+        $code = Invoke-InstallPlan -FilePath $Npm -Plan $plan -ArgumentList @($plan.arguments) -WorkingDirectory $WebRoot
         if ($code -eq 0 -and (Test-Path -LiteralPath (Join-Path $WebRoot "node_modules"))) {
             return
         }
         Write-Host "Web dependency install via $($plan.name) failed (exit code $code)."
     }
 
-    throw "Web dependency installation failed. npm could not reach a registry, usually because a system HTTP proxy is set but unreachable."
+    throw "Web dependency installation failed in $WebRoot. If npm reported a missing package.json, unpack the full repository so the web folder is present. Otherwise turn off an unused HTTP proxy or set a working HTTP_PROXY/HTTPS_PROXY, then run start-aigc.bat again."
 }
 
 if (Test-Path -LiteralPath $portPath) {
@@ -340,14 +355,18 @@ if (-not (Test-PythonPackages -Python $python)) {
 }
 
 Write-Host "[3/4] Preparing the web application..."
-$npmList = Invoke-Native -FilePath $npm -ArgumentList @("ls", "--prefix", $webRoot, "--depth=0") -Quiet
+$packageJson = Join-Path $webRoot "package.json"
+if (-not (Test-Path -LiteralPath $packageJson)) {
+    throw "Web application is missing. Expected package.json at $packageJson. Unpack the full AIGC repository so the web folder is next to start-aigc.bat."
+}
+$npmList = Invoke-Native -FilePath $npm -ArgumentList @("ls", "--depth=0") -WorkingDirectory $webRoot -Quiet
 if (-not (Test-Path -LiteralPath (Join-Path $webRoot "node_modules")) -or $npmList -ne 0) {
     Write-Host "Installing web dependencies..."
     Install-NpmPackages -Npm $npm -WebRoot $webRoot
 }
 
 if (-not $Dev) {
-    Assert-LastExitCode -Action "Web application build" -ExitCode (Invoke-Native -FilePath $npm -ArgumentList @("run", "build", "--prefix", $webRoot))
+    Assert-LastExitCode -Action "Web application build" -ExitCode (Invoke-Native -FilePath $npm -ArgumentList @("run", "build") -WorkingDirectory $webRoot)
 }
 
 Write-Host "[4/4] Starting AIGC Studio..."
@@ -391,7 +410,7 @@ else {
 if ($Dev) {
     Write-Host "Starting the development UI at http://127.0.0.1:5173"
     $env:AIGC_API_PORT = "$studioPort"
-    Assert-LastExitCode -Action "Development UI" -ExitCode (Invoke-Native -FilePath $npm -ArgumentList @("run", "dev", "--prefix", $webRoot))
+    Assert-LastExitCode -Action "Development UI" -ExitCode (Invoke-Native -FilePath $npm -ArgumentList @("run", "dev") -WorkingDirectory $webRoot)
     exit 0
 }
 
