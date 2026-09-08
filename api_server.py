@@ -77,6 +77,17 @@ from providers.video.google_veo_provider import GoogleVeoClient
 from providers.video.rest_client import VideoProviderRequestError
 from providers.video.seedance_provider import SeedanceClient
 from providers.mix.codex_terra_planner import CodexTerraPlanner, TerraPlannerError
+from providers.gateway_adapter import (
+    ARK_HOST,
+    GatewayCategoryMismatch,
+    GatewayDetectionError,
+    detect_gateway,
+    hostname_of,
+    match_protocol,
+    normalize_provider_models as _normalize_gateway_models,
+    suggested_name,
+    suggested_slug,
+)
 from cryptography.fernet import Fernet, InvalidToken
 
 
@@ -139,6 +150,160 @@ MODULE_OPTION_KEYS = {module_id: set(spec["options"]) for module_id, spec in MOD
 for _image_module in ("image.hermes", "image.liblib"):
     MODULE_OPTION_KEYS[_image_module].update({"timeout", "query_timeout", "result_timeout", "download_timeout"})
 MODULE_OPTION_KEYS["video.seedance"].add("timeout")
+BUILTIN_MODULE_IDS = frozenset(MODULE_SPECS)
+PROVIDER_MODULE_ALIASES = {
+    "liblib": "image.liblib",
+    "hermes": "image.hermes",
+    "hermes_volcano": "image.liblib",
+    "veo": "video.veo",
+    "seedance": "video.seedance",
+}
+BUILTIN_IMAGE_PROVIDERS = {"liblib", "hermes", "hermes_volcano"}
+BUILTIN_VIDEO_PROVIDERS = {"veo", "seedance"}
+LOCKED_IMAGE_PROVIDERS = {"liblib", "hermes", "hermes_volcano"}
+CUSTOM_MODULE_ID_RE = re.compile(r"^(image|video|mix)\.[a-z][a-z0-9_]{0,31}$")
+CATEGORY_PREFIX = {"image": "image", "video": "video", "mix_planner": "mix"}
+RESERVED_CUSTOM_SLUGS = {"hermes", "liblib", "veo", "seedance", "codex_terra"}
+MAX_CUSTOM_MODULES = 16
+
+
+def _protocol_for_module(module_id: str) -> str:
+    spec = MODULE_SPECS.get(module_id)
+    if spec and spec.get("kind") == "custom" and spec.get("protocol") in BUILTIN_MODULE_IDS:
+        return str(spec["protocol"])
+    if module_id in BUILTIN_MODULE_IDS:
+        return module_id
+    raise KeyError(module_id)
+
+def _occupied_custom_slugs() -> set[str]:
+    occupied = set(RESERVED_CUSTOM_SLUGS)
+    for module_id in (*MODULE_SPECS, *_stored_module_records()):
+        if isinstance(module_id, str) and "." in module_id:
+            occupied.add(module_id.split(".", 1)[1])
+    return occupied
+
+
+def _runtime_protocol(module_id: str, api_url: str, model: str = "") -> str:
+    stored = _protocol_for_module(module_id)
+    spec = MODULE_SPECS[module_id]
+    if spec.get("kind") != "custom":
+        return stored
+    return match_protocol(api_url, model=model or "", category=spec["category"], stored_protocol=stored)
+
+
+_TIMEOUT_OPTION_KEYS = frozenset({"timeout", "query_timeout", "result_timeout", "download_timeout"})
+
+
+def _uses_ark_image_gateway(api_url: str, model: str = "") -> bool:
+    host = hostname_of(api_url)
+    return host == ARK_HOST or (host.endswith(".volces.com") and host.startswith("ark.")) or "seedream" in (model or "").lower()
+
+
+def _module_client_kwargs(protocol: str, options: Mapping[str, str]) -> dict[str, Any]:
+    allowed = MODULE_OPTION_KEYS.get(protocol, set())
+    kwargs: dict[str, Any] = {}
+    for key, value in options.items():
+        if key not in allowed:
+            continue
+        kwargs[key] = float(value) if key in _TIMEOUT_OPTION_KEYS else value
+    return kwargs
+
+
+def _hydrate_custom_module(module_id: str, record: Mapping[str, Any]) -> None:
+    if module_id in BUILTIN_MODULE_IDS or not CUSTOM_MODULE_ID_RE.fullmatch(module_id):
+        return
+    protocol = record.get("protocol")
+    if protocol not in BUILTIN_MODULE_IDS:
+        return
+    template = MODULE_SPECS[protocol]
+    if template.get("kind") == "custom":
+        return
+    prefix = CATEGORY_PREFIX[template["category"]]
+    if not module_id.startswith(f"{prefix}."):
+        return
+    slug = module_id.split(".", 1)[1]
+    if slug in RESERVED_CUSTOM_SLUGS:
+        return
+    name = record.get("name")
+    MODULE_SPECS[module_id] = {
+        "name": name.strip() if isinstance(name, str) and name.strip() else template["name"],
+        "category": template["category"],
+        "env_prefix": f"CUSTOM_{module_id.replace('.', '_').upper()}",
+        "model": template["model"],
+        "api_url": template["api_url"],
+        "capabilities": list(template["capabilities"]),
+        "options": dict(template["options"]),
+        "protocol": protocol,
+        "kind": "custom",
+    }
+    MODULE_OPTION_KEYS[module_id] = set(MODULE_OPTION_KEYS[protocol])
+
+
+def _forget_custom_module(module_id: str) -> None:
+    if module_id in BUILTIN_MODULE_IDS:
+        return
+    MODULE_SPECS.pop(module_id, None)
+    MODULE_OPTION_KEYS.pop(module_id, None)
+
+
+def _registered_module_ids() -> list[str]:
+    _stored_module_records()
+    return list(MODULE_SPECS)
+
+
+def _module_id_for_provider(name: str | None) -> str | None:
+    if not isinstance(name, str) or not name.strip():
+        return None
+    normalized = name.strip().lower()
+    if normalized in PROVIDER_MODULE_ALIASES:
+        return PROVIDER_MODULE_ALIASES[normalized]
+    if normalized in MODULE_SPECS:
+        return normalized
+    stored = _stored_module_records()
+    if normalized in stored:
+        return normalized
+    return None
+
+
+def _public_provider_id(module_id: str) -> str:
+    if module_id == "image.hermes":
+        return "hermes"
+    if module_id == "image.liblib":
+        return "hermes_volcano"
+    if module_id == "video.veo":
+        return "veo"
+    if module_id == "video.seedance":
+        return "seedance"
+    return module_id
+
+
+def _is_image_provider(name: str) -> bool:
+    if name in BUILTIN_IMAGE_PROVIDERS:
+        return True
+    module_id = _module_id_for_provider(name)
+    spec = MODULE_SPECS.get(module_id or "")
+    return bool(spec and spec.get("category") == "image")
+
+
+def _is_video_provider(name: str) -> bool:
+    if name in BUILTIN_VIDEO_PROVIDERS:
+        return True
+    module_id = _module_id_for_provider(name)
+    spec = MODULE_SPECS.get(module_id or "")
+    return bool(spec and spec.get("category") == "video")
+
+
+def _custom_module_id(category: str, slug: str) -> str:
+    normalized_slug = slug.strip().lower()
+    prefix = CATEGORY_PREFIX[category]
+    module_id = f"{prefix}.{normalized_slug}"
+    if not CUSTOM_MODULE_ID_RE.fullmatch(module_id):
+        raise ValueError("自定义模块 ID 只能使用小写字母、数字和下划线")
+    if normalized_slug in RESERVED_CUSTOM_SLUGS or module_id in BUILTIN_MODULE_IDS:
+        raise ValueError("不能覆盖内置模块 ID")
+    return module_id
+
+
 
 
 class _DataBlob(ctypes.Structure):
@@ -239,7 +404,7 @@ def _resolve_reference_images(references: list[ReferenceImage]) -> list[str]:
 class GenerationRequest(BaseModel):
     mode: Literal["image", "model_outfit_swap", "clothing_image_to_image", "tiktok_clothing_image", "video", "shapewear_image", "shapewear_video", "tiktok_10s", "poster"]
     request: dict[str, Any] = Field(default_factory=dict)
-    provider: Literal["liblib", "hermes", "hermes_volcano", "veo", "seedance"] | None = None
+    provider: str | None = Field(default=None, max_length=64)
     reference_image: ReferenceImage | None = None
     reference_images: list[ReferenceImage] = Field(default_factory=list, max_length=16)
 
@@ -250,6 +415,8 @@ class GenerationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_contract(self) -> "GenerationRequest":
+        if isinstance(self.provider, str):
+            self.provider = self.provider.strip().lower() or None
         if self.mode == "clothing_image_to_image":
             if self.provider not in {None, "hermes"}:
                 raise ValueError("clothing image-to-image requires the Hermes provider")
@@ -264,14 +431,22 @@ class GenerationRequest(BaseModel):
             # Keep the old public alias accepted while persisting the current
             # canonical name used by the second Hermes/Volcano module.
             self.provider = "hermes_volcano"
-        if self.mode in {"image", "model_outfit_swap", "clothing_image_to_image", "tiktok_clothing_image", "shapewear_image", "poster"} and self.provider not in {None, "liblib", "hermes", "hermes_volcano"}:
-            raise ValueError("图片模式固定使用 Hermes，不支持切换视频 Provider")
-        if self.mode in {"image", "poster"} and self.provider is None:
-            self.provider = "hermes"
+        if self.mode == "shapewear_image" and self.provider not in {None, "hermes", "hermes_volcano"}:
+            raise ValueError("shapewear product images require the Hermes or Hermes Volcano image provider")
+        if self.mode in {"image", "poster"}:
+            if self.provider is None:
+                self.provider = "hermes"
+            elif self.provider == "liblib":
+                self.provider = "hermes_volcano"
+            elif not _is_image_provider(self.provider):
+                raise ValueError("图片模式仅支持图片 Provider")
         if self.mode == "tiktok_clothing_image" and self.provider is None:
             self.provider = "hermes"
-        if self.mode in {"video", "shapewear_video", "tiktok_10s"} and self.provider is None:
-            self.provider = "veo"
+        if self.mode in {"video", "shapewear_video", "tiktok_10s"}:
+            if self.provider is None:
+                self.provider = "veo"
+            elif not _is_video_provider(self.provider):
+                raise ValueError("视频模式仅支持视频 Provider")
         if self.reference_image and self.mode in _REFERENCE_IMAGE_MODES:
             raise ValueError("single reference_image is only supported for video modes")
         if self.mode == "model_outfit_swap":
@@ -332,7 +507,7 @@ class GenerationRequest(BaseModel):
 class PromptPreviewRequest(BaseModel):
     mode: Literal["image", "model_outfit_swap", "clothing_image_to_image", "tiktok_clothing_image", "video", "shapewear_image", "shapewear_video", "tiktok_10s", "poster"]
     request: dict[str, Any] = Field(default_factory=dict)
-    provider: Literal["liblib", "hermes", "hermes_volcano", "veo", "seedance"] | None = None
+    provider: str | None = Field(default=None, max_length=64)
 
 
 class R2UploadRequest(BaseModel):
@@ -416,6 +591,50 @@ class ModuleSettingsRequest(BaseModel):
             cleaned[key] = candidate.strip()
         return cleaned
 
+
+class CreateCustomModuleRequest(BaseModel):
+    name: str = Field(default="", max_length=64)
+    category: Literal["image", "video", "mix_planner"]
+    protocol: str = Field(default="", max_length=64)
+    slug: str = Field(default="", max_length=32)
+    api_url: str = Field(min_length=1, max_length=2048)
+    api_key: str | None = Field(default=None, max_length=4096)
+    model: str = Field(default="", max_length=256)
+    enabled: bool = True
+    options: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_pasted_credentials(cls, value: Any) -> Any:
+        return _normalize_pasted_settings_payload(value)
+
+    @field_validator("name", "protocol", "slug", "api_url", "model")
+    @classmethod
+    def trim_create_strings(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("options")
+    @classmethod
+    def validate_option_values(cls, value: dict[str, str]) -> dict[str, str]:
+        return ModuleSettingsRequest.validate_option_values(value)
+
+
+
+class GatewayDetectRequest(BaseModel):
+    api_url: str = Field(min_length=1, max_length=2048)
+    api_key: str | None = Field(default=None, max_length=4096)
+    category: Literal["image", "video", "mix_planner"] | None = None
+    model: str = Field(default="", max_length=256)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_pasted_credentials(cls, value: Any) -> Any:
+        return _normalize_pasted_settings_payload(value)
+
+    @field_validator("api_url", "model")
+    @classmethod
+    def trim_detect_strings(cls, value: str) -> str:
+        return value.strip()
 
 class BatchItem(BaseModel):
     client_id: str = Field(min_length=1, max_length=128)
@@ -927,6 +1146,7 @@ def _run_job(job_id: str) -> None:
                 request,
                 image=image,
                 provider=job.payload.provider,
+                client=_video_client_for_provider(job.payload.provider),
                 output_dir=output_dir,
                 poll_interval=2,
                 max_polls=120,
@@ -1321,11 +1541,14 @@ def _module_env_defaults(module_id: str) -> dict[str, Any]:
     spec = MODULE_SPECS[module_id]
     prefix = spec["env_prefix"]
     options = {key: env_value(f"{prefix}_{key.upper()}", default) or default for key, default in spec["options"].items()}
-    if module_id in {"image.hermes", "image.liblib"}:
-        options["timeout"] = env_value(f"{prefix}_TIMEOUT", "480") or "480"
-        options["query_timeout"] = env_value(f"{prefix}_QUERY_TIMEOUT", "30") or "30"
-        options["result_timeout"] = env_value(f"{prefix}_RESULT_TIMEOUT", "120") or "120"
-        options["download_timeout"] = env_value(f"{prefix}_DOWNLOAD_TIMEOUT", "120") or "120"
+    protocol = _protocol_for_module(module_id)
+    if protocol in {"image.hermes", "image.liblib"}:
+        options.setdefault("timeout", env_value(f"{prefix}_TIMEOUT", "480") or "480")
+        options.setdefault("query_timeout", env_value(f"{prefix}_QUERY_TIMEOUT", "30") or "30")
+        options.setdefault("result_timeout", env_value(f"{prefix}_RESULT_TIMEOUT", "120") or "120")
+        options.setdefault("download_timeout", env_value(f"{prefix}_DOWNLOAD_TIMEOUT", "120") or "120")
+    if protocol == "video.seedance":
+        options.setdefault("timeout", env_value(f"{prefix}_TIMEOUT", "180") or "180")
     return {
         "id": module_id,
         "name": spec["name"],
@@ -1336,6 +1559,9 @@ def _module_env_defaults(module_id: str) -> dict[str, Any]:
         "enabled": True,
         "capabilities": list(spec["capabilities"]),
         "options": options,
+        "kind": spec.get("kind", "builtin"),
+        "protocol": protocol,
+        "builtin": module_id in BUILTIN_MODULE_IDS,
     }
 
 
@@ -1349,14 +1575,27 @@ def _stored_module_records() -> dict[str, dict[str, Any]]:
     records = payload.get("modules", payload)
     if not isinstance(records, Mapping):
         return {}
-    return {module_id: dict(record) for module_id, record in records.items() if module_id in MODULE_SPECS and isinstance(record, Mapping)}
+    hydrated: dict[str, dict[str, Any]] = {}
+    for module_id, record in records.items():
+        if not isinstance(module_id, str) or not isinstance(record, Mapping):
+            continue
+        if module_id not in MODULE_SPECS:
+            _hydrate_custom_module(module_id, record)
+        if module_id in MODULE_SPECS:
+            hydrated[module_id] = dict(record)
+    return hydrated
 
 
 def _module_settings(module_id: str, *, include_key: bool = False) -> dict[str, Any]:
+    stored_records = _stored_module_records()
     if module_id not in MODULE_SPECS:
-        raise KeyError(module_id)
+        stored = stored_records.get(module_id)
+        if stored is not None:
+            _hydrate_custom_module(module_id, stored)
+        if module_id not in MODULE_SPECS:
+            raise KeyError(module_id)
     defaults = _module_env_defaults(module_id)
-    stored = _stored_module_records().get(module_id)
+    stored = stored_records.get(module_id)
     if stored is None and module_id == "image.hermes":
         legacy = _hermes_settings(include_key=True)
         defaults.update({key: legacy[key] for key in ("api_url", "api_key", "model")})
@@ -1365,6 +1604,9 @@ def _module_settings(module_id: str, *, include_key: bool = False) -> dict[str, 
         for key in ("api_url", "model", "enabled"):
             if key in stored and isinstance(stored[key], type(defaults[key])):
                 defaults[key] = stored[key]
+        stored_name = stored.get("name")
+        if isinstance(stored_name, str) and stored_name.strip():
+            defaults["name"] = stored_name.strip()
         if isinstance(stored.get("options"), Mapping):
             defaults["options"].update({key: value for key, value in stored["options"].items() if key in MODULE_OPTION_KEYS[module_id] and isinstance(value, str)})
         encrypted_key = stored.get("api_key", "")
@@ -1402,8 +1644,9 @@ def _apply_module_environment(record: Mapping[str, Any]) -> None:
             os.environ[environment_name] = str(value)
         else:
             os.environ.pop(environment_name, None)
-    if record["id"] == "video.seedance":
-        for environment_name in ("SEEDANCE_TEXT_MODEL", "SEEDANCE_IMAGE_MODEL"):
+    if _protocol_for_module(record["id"]) == "video.seedance":
+        for suffix in ("TEXT_MODEL", "IMAGE_MODEL"):
+            environment_name = f"{prefix}_{suffix}"
             if record.get("model"):
                 os.environ[environment_name] = str(record["model"])
             else:
@@ -1416,10 +1659,11 @@ def _restore_module_environments() -> None:
         _apply_module_environment(_module_settings(module_id, include_key=True))
 
 
-def _validate_module_options(module_id: str, options: Mapping[str, str]) -> None:
+def _validate_module_options(module_id: str, options: Mapping[str, str], protocol: str | None = None) -> None:
+    resolved = protocol or _protocol_for_module(module_id)
     for key, value in options.items():
         if key == "timeout":
-            if module_id not in {"image.hermes", "image.liblib", "video.seedance"}:
+            if resolved not in {"image.hermes", "image.liblib", "video.seedance"}:
                 raise ValueError("timeout is not supported by this module")
             try:
                 timeout = float(value)
@@ -1429,7 +1673,7 @@ def _validate_module_options(module_id: str, options: Mapping[str, str]) -> None
                 raise ValueError("timeout must be between 1 and 600 seconds")
             continue
         if key in {"query_timeout", "result_timeout", "download_timeout"}:
-            if module_id not in {"image.hermes", "image.liblib"}:
+            if resolved not in {"image.hermes", "image.liblib"}:
                 raise ValueError("timeout is only supported by the Hermes image module")
             try:
                 timeout = float(value)
@@ -1446,19 +1690,27 @@ def _write_module_settings(module_id: str, request: ModuleSettingsRequest) -> di
     if module_id not in MODULE_SPECS:
         raise KeyError(module_id)
     api_url = _validate_outbound_api_url(request.api_url)
-    allowed_options = MODULE_OPTION_KEYS[module_id]
-    if any(key not in allowed_options for key in request.options):
-        raise ValueError("此模块不支持该配置选项")
-    _validate_module_options(module_id, request.options)
     current = _module_settings(module_id, include_key=True)
+    spec = MODULE_SPECS[module_id]
+    protocol = _runtime_protocol(module_id, api_url, request.model or current.get("model") or "")
+    if spec.get("kind") == "custom" and protocol != spec.get("protocol"):
+        _hydrate_custom_module(module_id, {"protocol": protocol, "name": spec.get("name")})
+        MODULE_SPECS[module_id]["name"] = spec["name"]
+        spec = MODULE_SPECS[module_id]
+    allowed_options = MODULE_OPTION_KEYS[module_id]
+    filtered_options = {key: value for key, value in request.options.items() if key in allowed_options}
+    _validate_module_options(module_id, filtered_options, protocol)
     api_key = "" if request.clear_api_key else (parse_api_key(request.api_key) or current["api_key"])
     record = _module_env_defaults(module_id) | {
         "id": module_id,
+        "name": spec["name"],
         "api_url": api_url,
         "api_key": _protect_hermes_key(api_key),
         "model": request.model or _module_env_defaults(module_id)["model"],
         "enabled": request.enabled,
-        "options": _module_env_defaults(module_id)["options"] | request.options,
+        "options": _module_env_defaults(module_id)["options"] | filtered_options,
+        "kind": spec.get("kind", "builtin"),
+        "protocol": protocol,
     }
     with MODULE_SETTINGS_LOCK:
         records = _stored_module_records()
@@ -1473,103 +1725,82 @@ def _validate_module_draft(module_id: str, request: ModuleSettingsRequest) -> No
     if module_id not in MODULE_SPECS:
         raise KeyError(module_id)
     _validate_outbound_api_url(request.api_url)
-    if any(key not in MODULE_OPTION_KEYS[module_id] for key in request.options):
+    spec = MODULE_SPECS[module_id]
+    protocol = _runtime_protocol(module_id, request.api_url, request.model)
+    allowed_options = set(MODULE_OPTION_KEYS.get(protocol, ()))
+    if spec.get("kind") == "custom":
+        allowed_options |= set(MODULE_OPTION_KEYS.get(module_id, ()))
+    if any(key not in allowed_options for key in request.options):
         raise ValueError("此模块不支持该配置选项")
-    _validate_module_options(module_id, request.options)
+    _validate_module_options(
+        module_id,
+        {key: value for key, value in request.options.items() if key in MODULE_OPTION_KEYS.get(protocol, set())},
+        protocol,
+    )
 
 
 def _module_draft_client(module_id: str, request: ModuleSettingsRequest, api_key: str) -> Any:
-    if module_id == "image.hermes":
+    protocol = _runtime_protocol(module_id, request.api_url, request.model)
+    kwargs = _module_client_kwargs(protocol, request.options)
+    if protocol == "image.hermes":
         return HermesClient(
             api_url=request.api_url,
             api_key=api_key,
             model=request.model,
             request_logger=PROVIDER_LOGGER,
-            **request.options,
+            **kwargs,
         )
-    if module_id == "image.liblib":
-        parsed_host = (urlparse(request.api_url).hostname or "").lower()
-        if parsed_host == "ark.cn-beijing.volces.com" or "seedream" in request.model.lower():
+    if protocol == "image.liblib":
+        if _uses_ark_image_gateway(request.api_url, request.model):
             return HermesClient(
                 api_url=request.api_url,
                 api_key=api_key,
                 model=request.model,
                 request_logger=PROVIDER_LOGGER,
-                **request.options,
+                **kwargs,
             )
-        return LiblibClient(api_url=request.api_url, api_key=api_key, model=request.model)
-    if module_id == "video.veo":
+        liblib_timeout = kwargs.get("timeout")
+        return LiblibClient(
+            api_url=request.api_url,
+            api_key=api_key,
+            model=request.model,
+            request_logger=PROVIDER_LOGGER,
+            **({"timeout": liblib_timeout} if liblib_timeout is not None else {}),
+        )
+    if protocol == "video.veo":
         return GoogleVeoClient(api_url=request.api_url, api_key=api_key, model=request.model)
-    if module_id == "video.seedance":
+    if protocol == "video.seedance":
+        seedance_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if key in {"submit_path", "status_path", "result_path", "timeout"}
+        }
         return SeedanceClient(
             api_url=request.api_url,
             api_key=api_key,
             text_model=request.model,
             image_model=request.model,
             request_logger=PROVIDER_LOGGER,
-            timeout=float(request.options.get("timeout", "180")),
-            **{key: value for key, value in request.options.items() if key != "timeout"},
+            **seedance_kwargs,
         )
-    if module_id == "mix.codex_terra":
+    if protocol == "mix.codex_terra":
         return CodexTerraPlanner(api_url=request.api_url, api_key=api_key, model=request.model)
     raise KeyError(module_id)
 
 
 def _normalize_provider_models(payload: Any) -> list[dict[str, str]]:
-    candidates: Any = payload
-    if isinstance(payload, Mapping):
-        candidates = next(
-            (
-                payload[key]
-                for key in ("data", "models", "items", "result")
-                if isinstance(payload.get(key), list)
-            ),
-            [],
-        )
-    if not isinstance(candidates, list):
-        return []
-    normalized: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        if isinstance(candidate, str):
-            model_id = candidate.strip()
-            name = model_id
-        elif isinstance(candidate, Mapping):
-            raw_id = (
-                candidate.get("id")
-                or candidate.get("model")
-                or candidate.get("model_id")
-                or candidate.get("modelId")
-                or candidate.get("name")
-            )
-            if not isinstance(raw_id, str):
-                continue
-            model_id = raw_id.strip()
-            if model_id.startswith("models/"):
-                model_id = model_id[7:]
-            raw_name = (
-                candidate.get("displayName")
-                or candidate.get("display_name")
-                or candidate.get("label")
-                or candidate.get("name")
-            )
-            name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else model_id
-        else:
-            continue
-        if model_id and model_id not in seen:
-            seen.add(model_id)
-            normalized.append({"id": model_id, "name": name})
-    return normalized
+    return _normalize_gateway_models(payload)
 
 
 def _hermes_client_for_module(module_id: str) -> HermesClient:
     record = _module_settings(module_id, include_key=True)
+    protocol = _protocol_for_module(module_id)
     return HermesClient(
         api_url=record["api_url"],
         api_key=record["api_key"],
         model=record["model"],
         request_logger=PROVIDER_LOGGER,
-        **record["options"],
+        **_module_client_kwargs(protocol, record["options"]),
     )
 
 
@@ -1583,7 +1814,125 @@ def _image_client_for_provider(provider: str | None) -> Any | None:
         return _hermes_client()
     if normalized in {"hermes_volcano", "liblib"}:
         return _hermes_client_for_module("image.liblib")
+    module_id = _module_id_for_provider(normalized)
+    if not module_id:
+        return None
+    spec = MODULE_SPECS.get(module_id)
+    if not spec or spec.get("category") != "image":
+        return None
+    protocol = _protocol_for_module(module_id)
+    if protocol in {"image.hermes", "image.liblib"}:
+        record = _module_settings(module_id, include_key=True)
+        return _module_draft_client(module_id, ModuleSettingsRequest(api_url=record["api_url"], model=record["model"], options=record["options"]), record["api_key"])
     return None
+
+
+def _video_client_for_provider(provider: str | None) -> Any | None:
+    normalized = (provider or "veo").strip().lower()
+    module_id = _module_id_for_provider(normalized)
+    if not module_id:
+        return None
+    spec = MODULE_SPECS.get(module_id)
+    if not spec or spec.get("category") != "video":
+        return None
+    record = _module_settings(module_id, include_key=True)
+    return _module_draft_client(
+        module_id,
+        ModuleSettingsRequest(api_url=record["api_url"], model=record["model"], options=record["options"]),
+        record["api_key"],
+    )
+
+
+def _resolve_custom_module_identity(request: CreateCustomModuleRequest) -> tuple[str, str, str, str]:
+    occupied = _occupied_custom_slugs()
+    protocol = request.protocol.strip()
+    name = request.name.strip()
+    slug = request.slug.strip().lower()
+    model = request.model.strip()
+    if protocol:
+        if protocol not in BUILTIN_MODULE_IDS or MODULE_SPECS[protocol].get("kind") == "custom":
+            raise ValueError("协议模板必须是内置模块")
+        if MODULE_SPECS[protocol]["category"] != request.category:
+            raise ValueError("协议模板与能力分类不匹配")
+        if not slug:
+            slug = suggested_slug(request.api_url, request.category, occupied, protocol)
+        if not name:
+            name = suggested_name(protocol, request.api_url)
+        return protocol, name, slug, model
+    api_key = parse_api_key(request.api_key)
+    if api_key:
+        detection = detect_gateway(
+            api_url=request.api_url,
+            api_key=api_key,
+            category=request.category,
+            model=model,
+            occupied_slugs=occupied,
+        )
+        protocol = detection["protocol"]
+        name = name or detection["suggested_name"]
+        slug = slug or detection["suggested_slug"]
+        model = model or detection["selected_model"]
+    else:
+        protocol = match_protocol(request.api_url, model=model, category=request.category)
+        name = name or suggested_name(protocol, request.api_url)
+        slug = slug or suggested_slug(request.api_url, request.category, occupied, protocol)
+    if MODULE_SPECS[protocol]["category"] != request.category:
+        raise ValueError("识别到的网关与当前能力分类不匹配")
+    return protocol, name, slug, model
+
+def _create_custom_module(request: CreateCustomModuleRequest) -> dict[str, Any]:
+    protocol, name, slug, model = _resolve_custom_module_identity(request)
+    module_id = _custom_module_id(request.category, slug)
+    with MODULE_SETTINGS_LOCK:
+        stored = _stored_module_records()
+        custom_ids = {item_id for item_id, spec in MODULE_SPECS.items() if spec.get("kind") == "custom"}
+        custom_ids.update(item_id for item_id, item in stored.items() if isinstance(item, Mapping) and item.get("kind") == "custom")
+        if len(custom_ids) >= MAX_CUSTOM_MODULES:
+            raise ValueError("自定义模块数量已达上限")
+        if module_id in MODULE_SPECS or module_id in stored:
+            raise ValueError("该模块 ID 已存在")
+        _hydrate_custom_module(module_id, {"protocol": protocol, "name": name})
+        MODULE_SPECS[module_id]["name"] = name
+    settings = ModuleSettingsRequest(
+        api_url=request.api_url,
+        api_key=request.api_key,
+        model=model,
+        enabled=request.enabled,
+        options=request.options,
+    )
+    try:
+        return _write_module_settings(module_id, settings)
+    except Exception:
+        with MODULE_SETTINGS_LOCK:
+            records = _stored_module_records()
+            records.pop(module_id, None)
+            try:
+                _atomic_json_write(MODULE_SETTINGS_PATH, {"modules": records})
+            except OSError:
+                pass
+        _forget_custom_module(module_id)
+        raise
+
+
+def _delete_custom_module(module_id: str) -> None:
+    if module_id in BUILTIN_MODULE_IDS:
+        raise ValueError("不能删除内置模块")
+    if module_id not in MODULE_SPECS and module_id not in _stored_module_records():
+        raise KeyError(module_id)
+    with MODULE_SETTINGS_LOCK:
+        spec = MODULE_SPECS.get(module_id)
+        prefix = spec.get("env_prefix") if spec else None
+        option_keys = set(MODULE_OPTION_KEYS.get(module_id, ()))
+        records = _stored_module_records()
+        records.pop(module_id, None)
+        _atomic_json_write(MODULE_SETTINGS_PATH, {"modules": records})
+        if prefix:
+            for suffix in ("API_URL", "API_KEY", "MODEL", "TEXT_MODEL", "IMAGE_MODEL"):
+                os.environ.pop(f"{prefix}_{suffix}", None)
+            for key in option_keys:
+                os.environ.pop(f"{prefix}_{key.upper()}", None)
+        _forget_custom_module(module_id)
+    _restore_module_environments()
 
 
 def _atomic_json_write(path: Path, payload: Any) -> None:
@@ -1731,9 +2080,31 @@ def _local_mix_plan(request: MixPlanRequest) -> MixPlan:
     )
 
 
+def _mix_planner_module_id() -> str | None:
+    _stored_module_records()
+    enabled_custom: list[str] = []
+    builtin_id: str | None = None
+    for module_id, spec in MODULE_SPECS.items():
+        if spec.get("category") != "mix_planner":
+            continue
+        if _protocol_for_module(module_id) != "mix.codex_terra":
+            continue
+        record = _module_settings(module_id, include_key=True)
+        if not record.get("enabled") or not str(record.get("api_url") or "").strip() or not str(record.get("api_key") or "").strip():
+            continue
+        if spec.get("kind") == "custom":
+            enabled_custom.append(module_id)
+        elif module_id == "mix.codex_terra":
+            builtin_id = module_id
+    return enabled_custom[0] if enabled_custom else builtin_id
+
+
 def _terra_planner() -> CodexTerraPlanner | None:
     """Read Terra credentials only in the server process, never from a request."""
-    record = _module_settings("mix.codex_terra", include_key=True)
+    module_id = _mix_planner_module_id()
+    if not module_id:
+        return None
+    record = _module_settings(module_id, include_key=True)
     api_url = record["api_url"]
     api_key = record["api_key"]
     if not record["enabled"] or not api_url.strip() or not api_key.strip():
@@ -1878,16 +2249,38 @@ def _run_mix(mix_id: str, request: MixRequest) -> None:
 
 
 def _provider_available(name: str) -> tuple[bool, str | None]:
-    module_id = {
-        "liblib": "image.liblib",  # legacy alias for the second Hermes slot
-        "hermes": "image.hermes",
-        "hermes_volcano": "image.liblib",
-        "veo": "video.veo",
-        "seedance": "video.seedance",
-    }[name]
+    module_id = _module_id_for_provider(name)
+    if not module_id:
+        raise KeyError(name)
     record = _module_settings(module_id, include_key=True)
     available = bool(record.get("enabled") and record.get("api_key"))
     return available, None if available else "未完成本地 API Key 配置"
+
+
+def _public_provider_record(module_id: str) -> dict[str, Any]:
+    spec = MODULE_SPECS[module_id]
+    protocol = _protocol_for_module(module_id)
+    available, reason = _provider_available(_public_provider_id(module_id))
+    if spec["category"] == "image":
+        media_types = ["image"]
+        input_modes = ["text", "image", "references"]
+    elif spec["category"] == "video":
+        media_types = ["video"]
+        input_modes = ["text", "public_https_image"] if protocol == "video.seedance" else ["text", "image"]
+    else:
+        media_types = []
+        input_modes = ["text"]
+    return {
+        "id": _public_provider_id(module_id),
+        "module_id": module_id,
+        "name": spec["name"],
+        "kind": spec.get("kind", "builtin"),
+        "protocol": protocol,
+        "media_types": media_types,
+        "input_modes": input_modes,
+        "available": available,
+        "reason": reason,
+    }
 
 
 def _media_signature_matches(name: str, header: bytes) -> bool:
@@ -1938,7 +2331,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type"],
 )
 
@@ -1959,18 +2352,22 @@ def health() -> dict[str, str]:
 
 @app.get("/api/providers")
 def providers() -> dict[str, Any]:
-    hermes_ready, hermes_reason = _provider_available("hermes")
-    hermes_volcano_ready, hermes_volcano_reason = _provider_available("hermes_volcano")
-    veo_ready, veo_reason = _provider_available("veo")
-    seedance_ready, seedance_reason = _provider_available("seedance")
-    return {
-        "providers": [
-            {"id": "hermes", "media_types": ["image"], "input_modes": ["text", "image", "references"], "available": hermes_ready, "reason": hermes_reason},
-            {"id": "hermes_volcano", "media_types": ["image"], "input_modes": ["text", "image", "references"], "available": hermes_volcano_ready, "reason": hermes_volcano_reason},
-            {"id": "veo", "media_types": ["video"], "input_modes": ["text", "image"], "available": veo_ready, "reason": veo_reason},
-            {"id": "seedance", "media_types": ["video"], "input_modes": ["text", "public_https_image"], "available": seedance_ready, "reason": seedance_reason},
-        ]
-    }
+    _stored_module_records()
+    listed: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for module_id in ("image.hermes", "image.liblib", "video.veo", "video.seedance"):
+        record = _public_provider_record(module_id)
+        listed.append(record)
+        seen.add(record["id"])
+    for module_id, spec in MODULE_SPECS.items():
+        if spec.get("category") not in {"image", "video"}:
+            continue
+        record = _public_provider_record(module_id)
+        if record["id"] in seen:
+            continue
+        listed.append(record)
+        seen.add(record["id"])
+    return {"providers": listed}
 
 
 @app.get("/api/settings/hermes")
@@ -2005,7 +2402,7 @@ def test_hermes_settings(request: HermesSettingsRequest | None = None) -> dict[s
 
 @app.get("/api/settings/modules")
 def get_module_settings() -> dict[str, Any]:
-    return {"modules": [_module_settings(module_id) for module_id in MODULE_SPECS]}
+    return {"modules": [_module_settings(module_id) for module_id in _registered_module_ids()]}
 
 
 @app.get("/api/settings/modules/{module_id}")
@@ -2099,6 +2496,70 @@ def discover_module_models(module_id: str, request: ModuleSettingsRequest) -> di
             else "The provider returned no recognizable models; enter a model ID manually"
         ),
     }
+
+
+@app.post("/api/settings/gateways/detect")
+def detect_production_gateway(request: GatewayDetectRequest) -> dict[str, Any]:
+    try:
+        api_url = _validate_outbound_api_url(request.api_url)
+        api_key = parse_api_key(request.api_key)
+        if not api_key:
+            raise ValueError("自动识别网关需要 API Key")
+        detection = detect_gateway(
+            api_url=api_url,
+            api_key=api_key,
+            category=request.category,
+            model=request.model,
+            occupied_slugs=_occupied_custom_slugs(),
+        )
+    except GatewayCategoryMismatch as error:
+        raise HTTPException(status_code=400, detail={"code": "gateway_category_mismatch", "message": str(error)}) from error
+    except GatewayDetectionError as error:
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "gateway_detection_failed", "message": "无法识别该网关，请检查 API 地址和密钥"},
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail={"code": "invalid_settings", "message": str(error)}) from error
+    return {
+        "ok": True,
+        "protocol": detection["protocol"],
+        "category": detection["category"],
+        "label": detection["label"],
+        "models": detection["models"],
+        "selected_model": detection["selected_model"],
+        "suggested_name": detection["suggested_name"],
+        "suggested_slug": detection["suggested_slug"],
+        "source": detection["source"],
+        "manual_entry": True,
+        "message": "已识别生产网关" if detection["models"] else "已匹配生产网关，请手动填写模型 ID",
+    }
+
+
+@app.post("/api/settings/modules", status_code=201)
+def create_custom_module(request: CreateCustomModuleRequest) -> dict[str, Any]:
+    try:
+        return _create_custom_module(request)
+    except GatewayCategoryMismatch as error:
+        raise HTTPException(status_code=400, detail={"code": "gateway_category_mismatch", "message": str(error)}) from error
+    except GatewayDetectionError as error:
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "gateway_detection_failed", "message": "无法识别该网关，请检查 API 地址和密钥"},
+        ) from error
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=400, detail={"code": "invalid_settings", "message": str(error)}) from error
+
+
+@app.delete("/api/settings/modules/{module_id}", status_code=204)
+def delete_custom_module(module_id: str) -> Response:
+    try:
+        _delete_custom_module(module_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail={"code": "unknown_module", "message": "未找到该 API 模块"}) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail={"code": "invalid_settings", "message": str(error)}) from error
+    return Response(status_code=204)
 
 
 @app.post("/api/generation-batches", status_code=202)

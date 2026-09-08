@@ -83,12 +83,26 @@ class ApiServerTests(unittest.TestCase):
         self.hermes_key_patch.start()
         self.batch_store_patch.start()
         self.mix_store_patch.start()
+        self._module_specs_snapshot = {module_id: dict(spec) for module_id, spec in api_server.MODULE_SPECS.items()}
+        self._module_option_keys_snapshot = {module_id: set(keys) for module_id, keys in api_server.MODULE_OPTION_KEYS.items()}
+        self._environ_snapshot = dict(os.environ)
         api_server.JOBS.clear()
         api_server.R2_UPLOADS.clear()
         api_server.BATCHES.clear()
         api_server.MIXES.clear()
 
     def tearDown(self) -> None:
+        for module_id in list(api_server.MODULE_SPECS):
+            if module_id not in self._module_specs_snapshot:
+                api_server._forget_custom_module(module_id)
+        api_server.MODULE_SPECS.clear()
+        api_server.MODULE_SPECS.update({module_id: dict(spec) for module_id, spec in self._module_specs_snapshot.items()})
+        api_server.MODULE_OPTION_KEYS.clear()
+        api_server.MODULE_OPTION_KEYS.update({module_id: set(keys) for module_id, keys in self._module_option_keys_snapshot.items()})
+        for name in list(os.environ):
+            if name not in self._environ_snapshot:
+                os.environ.pop(name, None)
+        os.environ.update(self._environ_snapshot)
         self.output_patch.stop()
         self.outputs_dir_patch.stop()
         self.r2_store_patch.stop()
@@ -590,6 +604,267 @@ class ApiServerTests(unittest.TestCase):
             self.assertEqual(os.environ["SEEDANCE_API_KEY"], "persisted-key")
             self.assertEqual(os.environ["SEEDANCE_TEXT_MODEL"], "seedance-custom")
             self.assertEqual(os.environ["SEEDANCE_IMAGE_MODEL"], "seedance-custom")
+
+
+    def test_custom_image_module_is_listed_usable_and_deleted(self) -> None:
+        created = self.client.post(
+            "/api/settings/modules",
+            json={
+                "name": "备用图片网关",
+                "category": "image",
+                "protocol": "image.hermes",
+                "slug": "backup",
+                "api_url": "https://8.8.8.8/v1",
+                "api_key": "custom-secret",
+                "model": "custom-image",
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        record = created.json()
+        self.assertEqual(record["id"], "image.backup")
+        self.assertEqual(record["kind"], "custom")
+        self.assertEqual(record["protocol"], "image.hermes")
+        self.assertTrue(record["api_key_configured"])
+        self.assertNotIn("custom-secret", created.text)
+        self.assertEqual(os.environ["CUSTOM_IMAGE_BACKUP_API_KEY"], "custom-secret")
+
+        providers = self.client.get("/api/providers").json()["providers"]
+        self.assertIn("image.backup", {item["id"] for item in providers})
+        self.assertTrue(any(item["id"] == "image.backup" and item["available"] for item in providers))
+
+        registry = self.client.get("/api/settings/modules")
+        self.assertIn("image.backup", {item["id"] for item in registry.json()["modules"]})
+
+        deleted = self.client.delete("/api/settings/modules/image.backup")
+        self.assertEqual(deleted.status_code, 204)
+        self.assertNotIn("CUSTOM_IMAGE_BACKUP_API_KEY", os.environ)
+        self.assertEqual(self.client.get("/api/settings/modules/image.backup").status_code, 404)
+        self.assertNotIn("image.backup", {item["id"] for item in self.client.get("/api/providers").json()["providers"]})
+
+    def test_custom_mix_planner_is_preferred_over_builtin(self) -> None:
+        created = self.client.post(
+            "/api/settings/modules",
+            json={
+                "name": "备用混剪规划",
+                "category": "mix_planner",
+                "protocol": "mix.codex_terra",
+                "slug": "backup",
+                "api_url": "https://8.8.8.8/v1",
+                "api_key": "planner-secret",
+                "model": "gpt-5.6-terra",
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(api_server._mix_planner_module_id(), "mix.backup")
+        with patch.dict(os.environ, {"CODEX_TERRA_API_KEY": "builtin-key", "CODEX_TERRA_API_URL": "https://8.8.8.8/v1"}, clear=False):
+            self.assertEqual(self.client.delete("/api/settings/modules/mix.backup").status_code, 204)
+            self.assertEqual(api_server._mix_planner_module_id(), "mix.codex_terra")
+            self.assertEqual(os.environ["CODEX_TERRA_API_KEY"], "builtin-key")
+
+    @patch("api_server.JOB_EXECUTOR.submit")
+    def test_custom_image_provider_can_enqueue_generation(self, submit) -> None:
+        created = self.client.post(
+            "/api/settings/modules",
+            json={
+                "name": "备用图片网关",
+                "category": "image",
+                "protocol": "image.hermes",
+                "slug": "backup",
+                "api_url": "https://8.8.8.8/v1",
+                "api_key": "custom-secret",
+                "model": "custom-image",
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        response = self.client.post(
+            "/api/generations",
+            json={"mode": "image", "provider": "image.backup", "request": {"prompt": "studio product photo"}},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        job_id = response.json()["job_id"]
+        self.assertEqual(api_server.JOBS[job_id].payload.provider, "image.backup")
+        submit.assert_called_once()
+
+    def test_custom_module_survives_in_memory_registry_reload(self) -> None:
+        created = self.client.post(
+            "/api/settings/modules",
+            json={
+                "name": "备用图片网关",
+                "category": "image",
+                "protocol": "image.hermes",
+                "slug": "backup",
+                "api_url": "https://8.8.8.8/v1",
+                "api_key": "custom-secret",
+                "model": "custom-image",
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        api_server._forget_custom_module("image.backup")
+        self.assertNotIn("image.backup", api_server.MODULE_SPECS)
+        listed = self.client.get("/api/settings/modules").json()["modules"]
+        record = next(item for item in listed if item["id"] == "image.backup")
+        self.assertEqual(record["kind"], "custom")
+        self.assertEqual(record["protocol"], "image.hermes")
+        self.assertEqual(record["name"], "备用图片网关")
+        self.assertEqual(api_server.MODULE_SPECS["image.backup"]["protocol"], "image.hermes")
+
+    def test_delete_custom_module_does_not_clear_builtin_env(self) -> None:
+        with patch.dict(os.environ, {"HERMES_API_KEY": "builtin-hermes"}, clear=False):
+            created = self.client.post(
+                "/api/settings/modules",
+                json={
+                    "name": "备用图片网关",
+                    "category": "image",
+                    "protocol": "image.hermes",
+                    "slug": "backup",
+                    "api_url": "https://8.8.8.8/v1",
+                    "api_key": "custom-secret",
+                    "model": "custom-image",
+                },
+            )
+            self.assertEqual(created.status_code, 201)
+            self.assertEqual(self.client.delete("/api/settings/modules/image.backup").status_code, 204)
+            self.assertEqual(os.environ["HERMES_API_KEY"], "builtin-hermes")
+            self.assertNotIn("CUSTOM_IMAGE_BACKUP_API_KEY", os.environ)
+
+    @patch("api_server.JOB_EXECUTOR.submit")
+    def test_custom_video_provider_can_enqueue_generation(self, submit) -> None:
+        created = self.client.post(
+            "/api/settings/modules",
+            json={
+                "name": "备用视频网关",
+                "category": "video",
+                "protocol": "video.veo",
+                "slug": "backup",
+                "api_url": "https://8.8.8.8/v1",
+                "api_key": "video-secret",
+                "model": "veo-custom",
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        response = self.client.post(
+            "/api/generations",
+            json={"mode": "video", "provider": "video.backup", "request": {"prompt": "studio product video"}},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        job_id = response.json()["job_id"]
+        self.assertEqual(api_server.JOBS[job_id].payload.provider, "video.backup")
+        submit.assert_called_once()
+
+
+
+    def test_custom_module_rejects_reserved_slug_and_builtin_delete(self) -> None:
+        reserved = self.client.post(
+            "/api/settings/modules",
+            json={
+                "name": "覆盖 Hermes",
+                "category": "image",
+                "protocol": "image.hermes",
+                "slug": "hermes",
+                "api_url": "https://8.8.8.8/v1",
+                "api_key": "key",
+            },
+        )
+        self.assertEqual(reserved.status_code, 400)
+        builtin = self.client.delete("/api/settings/modules/image.hermes")
+        self.assertEqual(builtin.status_code, 400)
+
+    @patch("api_server.detect_gateway")
+    def test_detect_gateway_returns_protocol_and_models(self, detect) -> None:
+        detect.return_value = {
+            "protocol": "image.liblib",
+            "category": "image",
+            "label": "火山方舟 / Liblib 图片网关",
+            "models": [{"id": "doubao-seedream-5-0-pro-260628", "name": "Seedream"}],
+            "selected_model": "doubao-seedream-5-0-pro-260628",
+            "suggested_name": "火山方舟图片网关",
+            "suggested_slug": "ark",
+            "source": "provider",
+            "manual_entry": True,
+        }
+        response = self.client.post(
+            "/api/settings/gateways/detect",
+            json={
+                "api_url": "https://ark.cn-beijing.volces.com/api/v3",
+                "api_key": "ark-secret",
+                "category": "image",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["protocol"], "image.liblib")
+        self.assertEqual(payload["suggested_slug"], "ark")
+        self.assertEqual(payload["models"][0]["id"], "doubao-seedream-5-0-pro-260628")
+        self.assertNotIn("ark-secret", response.text)
+        detect.assert_called_once()
+
+    @patch("api_server.detect_gateway")
+    def test_create_custom_module_from_url_and_key_without_protocol(self, detect) -> None:
+        detect.return_value = {
+            "protocol": "image.hermes",
+            "category": "image",
+            "label": "Hermes 兼容图片网关",
+            "models": [{"id": "gpt-image-2", "name": "gpt-image-2"}],
+            "selected_model": "gpt-image-2",
+            "suggested_name": "Hermes 兼容图片网关",
+            "suggested_slug": "backup",
+            "source": "provider",
+            "manual_entry": True,
+        }
+        created = self.client.post(
+            "/api/settings/modules",
+            json={
+                "category": "image",
+                "api_url": "https://aiapi.yicheng.bj.cn/v1",
+                "api_key": "custom-secret",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        record = created.json()
+        self.assertEqual(record["id"], "image.backup")
+        self.assertEqual(record["protocol"], "image.hermes")
+        self.assertEqual(record["model"], "gpt-image-2")
+        self.assertNotIn("custom-secret", created.text)
+
+    @patch("api_server.HermesClient.test_connection", return_value={"ok": True})
+    def test_custom_module_save_switches_protocol_from_url(self, probe) -> None:
+        created = self.client.post(
+            "/api/settings/modules",
+            json={
+                "name": "备用图片网关",
+                "category": "image",
+                "protocol": "image.hermes",
+                "slug": "backup",
+                "api_url": "https://8.8.8.8/v1",
+                "api_key": "custom-secret",
+                "model": "custom-image",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        saved = self.client.put(
+            "/api/settings/modules/image.backup",
+            json={
+                "api_url": "https://ark.cn-beijing.volces.com/api/v3",
+                "model": "doubao-seedream-5-0-pro-260628",
+                "enabled": True,
+                "options": {"timeout": "120"},
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["protocol"], "image.liblib")
+        self.assertEqual(api_server.MODULE_SPECS["image.backup"]["protocol"], "image.liblib")
+        tested = self.client.post(
+            "/api/settings/modules/image.backup/test",
+            json={
+                "api_url": "https://ark.cn-beijing.volces.com/api/v3",
+                "api_key": "draft-secret",
+                "model": "doubao-seedream-5-0-pro-260628",
+                "options": {"timeout": "90"},
+            },
+        )
+        self.assertEqual(tested.status_code, 200, tested.text)
+        probe.assert_called_once()
+
 
     def test_media_import_copies_supported_files_into_managed_root(self) -> None:
         response = self.client.post(
@@ -1197,9 +1472,10 @@ class ApiServerTests(unittest.TestCase):
             api_server._run_job(job.id)
         self.assertEqual(generate_skill.call_args.kwargs["provider"], "hermes_volcano")
 
+    @patch("api_server._image_client_for_provider", return_value=object())
     @patch("api_server._provider_available", return_value=(True, None))
     @patch("api_server.generate_image")
-    def test_mock_image_job_saves_and_exposes_asset(self, generate_image, _available) -> None:
+    def test_mock_image_job_saves_and_exposes_asset(self, generate_image, _available, _client) -> None:
         output = self.images / "mock.png"
 
         def fake_generation(*args, **kwargs):

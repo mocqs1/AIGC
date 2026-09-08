@@ -2,6 +2,7 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
 async function request(path, options) {
   const response = await fetch(`${API_BASE}${path}`, options)
+  if (response.status === 204) return null
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
     const detail = payload.detail
@@ -40,6 +41,28 @@ export function discoverModuleModels(moduleId, body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  })
+}
+
+export function detectGateway(body) {
+  return request('/api/settings/gateways/detect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export function createCustomModule(body) {
+  return request('/api/settings/modules', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteCustomModule(moduleId) {
+  return request(`/api/settings/modules/${encodeURIComponent(moduleId)}`, {
+    method: 'DELETE',
   })
 }
 

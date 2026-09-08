@@ -41,6 +41,7 @@ draft. Each module has:
   `api_key_configured`; leaving the field empty preserves the key;
 - model id and any provider-specific path/options;
 - **Test connection**, **Save**, and **Cancel** actions;
+- create/delete for custom modules that reuse a builtin protocol;
 - a status indicator (`未配置`, `已配置`, `连接成功`, or `连接失败`).
 
 Save and test requests go to the local AIGC API. The browser never calls a
@@ -87,13 +88,19 @@ local planner.
 ### Registry and records
 
 ```text
-GET  /api/settings/modules
-GET  /api/settings/modules/{module_id}
-PUT  /api/settings/modules/{module_id}
-POST /api/settings/modules/{module_id}/test
+GET    /api/settings/modules
+POST   /api/settings/modules
+GET    /api/settings/modules/{module_id}
+PUT    /api/settings/modules/{module_id}
+DELETE /api/settings/modules/{module_id}
+POST   /api/settings/modules/{module_id}/test
+POST   /api/settings/modules/{module_id}/models
+POST   /api/settings/gateways/detect
 ```
 
-`module_id` must be one of the registered ids above; unknown ids return 404.
+Builtin `module_id` values are the table above. Custom modules use
+`{category_prefix}.{slug}` (`image.`, `video.`, or `mix.`) and must copy a
+builtin protocol. Unknown ids return 404. Builtin modules cannot be deleted.
 The registry response is safe to render directly:
 
 ```json
@@ -129,6 +136,39 @@ The write contract is:
   "options": {}
 }
 ```
+
+`POST /api/settings/gateways/detect` takes a pasted `api_url`, write-only
+`api_key`, optional `category`, and optional `model`. It matches a builtin
+production protocol from host/model fingerprints, probes the provider catalog,
+and returns a redacted `{ protocol, category, label, models, selected_model,
+suggested_name, suggested_slug }` payload. Keys never appear in the response.
+
+`POST /api/settings/modules` creates a custom module. `protocol` and `slug` are
+optional: with a key the server detects the gateway; without a key it matches
+the URL. The body is:
+
+```json
+{
+  "name": "备用混剪规划",
+  "category": "mix_planner",
+  "protocol": "mix.codex_terra",
+  "slug": "backup",
+  "api_url": "https://planner.example/v1/chat/completions",
+  "api_key": "new-key",
+  "model": "gpt-5.6-terra",
+  "enabled": true,
+  "options": {}
+}
+```
+
+A successful create returns `201` and the same redacted record as GET, with
+`id` `{category_prefix}.{slug}`, `kind: "custom"`, and `protocol` equal to the
+resolved builtin. Saving a custom module may switch `protocol` when the URL
+now matches a different production gateway. `DELETE` returns `204` and is
+rejected for builtin ids.
+Custom image/video modules appear on `GET /api/providers` using the module id
+as the public provider id. An enabled custom mix planner is preferred over
+`mix.codex_terra`.
 
 `api_key` is optional and write-only. An omitted or blank key preserves the
 existing key unless `clear_api_key` is true. A successful write returns the

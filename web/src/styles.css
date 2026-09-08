@@ -104,6 +104,15 @@ button:disabled { cursor: not-allowed; }
 .api-module-tab.is-selected small { color: #147d90; }
 .api-module-dot { width: 6px; height: 6px; border-radius: 50%; background: #d5a13f; }
 .api-module-dot.is-ready { background: #18a66a; }
+.api-create-module { margin-top: 8px; padding: 11px 12px 12px; display: grid; gap: 8px; border: 1px dashed #c5d6dc; border-radius: 6px; background: #fff; }
+.api-create-module strong { color: #263741; font-size: 12px; }
+.api-create-module .field { margin-top: 0; }
+.api-create-module .secondary-button { width: 100%; }
+.api-detect-result { display: grid; gap: 8px; padding: 9px 10px; border: 1px solid #c5e7ee; border-radius: 6px; background: #f4fcfd; }
+.api-detect-protocol { margin: 0; color: #0d6f82; font-size: 12px; font-weight: 720; }
+
+.danger-button { color: #a1392e; border-color: #e4b8b2; }
+.danger-button:hover:not(:disabled) { color: #8a2c24; border-color: #c97870; background: #fff7f6; }
 .api-settings-dialog .api-module-form { min-width: 0; padding: 19px 20px 20px; border: 1px solid #dce6e9; border-radius: 7px; background: #fbfdfe; }
 .api-settings-dialog .api-module-title { padding-bottom: 14px; border-bottom: 1px solid #e2eaed; }
 .api-settings-dialog .api-module-title h3 { color: #1f333d; font-size: 16px; }

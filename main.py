@@ -118,10 +118,13 @@ def generate_video(
     selected_provider = provider or workflow["provider"]
     if isinstance(request, Mapping) and request.get("provider") is not None:
         requested_provider = request.get("provider")
-        if not isinstance(requested_provider, str) or requested_provider.strip().lower() not in {"veo", "seedance"}:
-            raise ValueError("provider must be veo or seedance")
+        if not isinstance(requested_provider, str) or not requested_provider.strip():
+            raise ValueError("provider must be a non-empty string")
         selected_provider = requested_provider.strip().lower()
-    if not isinstance(selected_provider, str) or selected_provider.strip().lower() not in {"veo", "seedance"}:
+    if not isinstance(selected_provider, str) or not selected_provider.strip():
+        raise ValueError("provider must be a non-empty string")
+    selected_provider = selected_provider.strip().lower()
+    if client is None and selected_provider not in {"veo", "seedance"}:
         raise ValueError("provider must be veo or seedance")
     if image is None and isinstance(request, Mapping):
         candidate = request.get("image")

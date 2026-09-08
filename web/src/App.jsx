@@ -25,12 +25,16 @@ import {
   Sparkles,
   ShieldCheck,
   WandSparkles,
+  Trash2,
   X,
 } from 'lucide-react'
 import {
+  createCustomModule,
   createGeneration,
   createGenerationBatch,
   createMix,
+  deleteCustomModule,
+  detectGateway,
   discoverModuleModels,
   planMix,
   fetchGenerationBatch,
@@ -272,6 +276,18 @@ const MODULE_BY_PROVIDER = {
   seedance: 'video.seedance',
 }
 
+
+function moduleIdForProvider(provider, modules = []) {
+  if (!provider) return undefined
+  if (MODULE_BY_PROVIDER[provider]) return MODULE_BY_PROVIDER[provider]
+  return modules.some((item) => item.id === provider) ? provider : undefined
+}
+
+function mixPlannerModule(modules = []) {
+  const planners = modules.filter((item) => item.category === 'mix_planner' && item.enabled !== false && item.api_key_configured)
+  return planners.find((item) => item.kind === 'custom') || planners.find((item) => item.id === 'mix.codex_terra') || null
+}
+
 function moduleModelLabel(module, catalog) {
   const modelId = typeof module?.model === 'string' ? module.model.trim() : ''
   if (!modelId) return '未配置模型'
@@ -284,7 +300,7 @@ function moduleModelLabel(module, catalog) {
 }
 
 function modelSnapshot(provider, modules, modelCatalog) {
-  const moduleId = MODULE_BY_PROVIDER[provider]
+  const moduleId = moduleIdForProvider(provider, modules)
   const module = modules.find((item) => item.id === moduleId)
   const modelId = typeof module?.model === 'string' ? module.model.trim() : ''
   if (!modelId) return {}
@@ -304,7 +320,7 @@ function jobModelLabel(job, modules, modelCatalog) {
     .find((value) => typeof value === 'string' && value.trim())?.trim() || ''
   if (name) return name
   if (model) return model
-  const moduleId = MODULE_BY_PROVIDER[job?.provider]
+  const moduleId = moduleIdForProvider(job?.provider, modules)
   return moduleModelLabel((modules || []).find((item) => item.id === moduleId), modelCatalog?.[moduleId])
 }
 
@@ -314,20 +330,23 @@ function ProviderPicker({ provider, providers, modules = [], modelCatalog, onCha
     <div className="provider-picker">
       <span className="field-label">视频模型</span>
       <div className="provider-options">
-        {videoProviders.map((item) => (
-          <button
-            type="button"
-            key={item.id}
-            className={classNames('provider-option', provider === item.id && 'is-selected', !item.available && 'is-unavailable')}
-            onClick={() => item.available && onChange(item.id)}
-            disabled={!item.available}
-            title={item.available ? item.id : item.reason}
-          >
-            <span className="provider-radio" />
-            <span className="provider-option-label"><strong>{moduleModelLabel(modules.find((module) => module.id === MODULE_BY_PROVIDER[item.id]), modelCatalog?.[MODULE_BY_PROVIDER[item.id]])}</strong><small>{item.id}</small></span>
-            {!item.available && <small>未配置</small>}
-          </button>
-        ))}
+        {videoProviders.map((item) => {
+          const moduleId = moduleIdForProvider(item.id, modules) || item.module_id
+          return (
+            <button
+              type="button"
+              key={item.id}
+              className={classNames('provider-option', provider === item.id && 'is-selected', !item.available && 'is-unavailable')}
+              onClick={() => item.available && onChange(item.id)}
+              disabled={!item.available}
+              title={item.available ? item.name || item.id : item.reason}
+            >
+              <span className="provider-radio" />
+              <span className="provider-option-label"><strong>{moduleModelLabel(modules.find((module) => module.id === moduleId), modelCatalog?.[moduleId])}</strong><small>{item.name || item.id}</small></span>
+              {!item.available && <small>未配置</small>}
+            </button>
+          )
+        })}
       </div>
     </div>
   )
@@ -338,9 +357,12 @@ function ImageProviderPicker({ provider, providers, modules = [], modelCatalog, 
   return <div className="provider-picker">
     <span className="field-label">{label}</span>
     <div className="provider-options">
-      {imageProviders.map((item) => <button type="button" key={item.id} className={classNames('provider-option', provider === item.id && 'is-selected', !item.available && 'is-unavailable')} onClick={() => item.available && onChange(item.id)} disabled={!item.available} title={item.available ? item.id : item.reason}>
-        <span className="provider-radio" /><span className="provider-option-label"><strong>{moduleModelLabel(modules.find((module) => module.id === MODULE_BY_PROVIDER[item.id]), modelCatalog?.[MODULE_BY_PROVIDER[item.id]])}</strong><small>{item.id}</small></span>{!item.available && <small>未配置</small>}
-      </button>)}
+      {imageProviders.map((item) => {
+        const moduleId = moduleIdForProvider(item.id, modules) || item.module_id
+        return <button type="button" key={item.id} className={classNames('provider-option', provider === item.id && 'is-selected', !item.available && 'is-unavailable')} onClick={() => item.available && onChange(item.id)} disabled={!item.available} title={item.available ? item.name || item.id : item.reason}>
+          <span className="provider-radio" /><span className="provider-option-label"><strong>{moduleModelLabel(modules.find((module) => module.id === moduleId), modelCatalog?.[moduleId])}</strong><small>{item.name || item.id}</small></span>{!item.available && <small>未配置</small>}
+        </button>
+      })}
     </div>
   </div>
 }
@@ -355,38 +377,111 @@ function apiCategoryMeta(category) {
   return API_CATEGORY_META[category] || { label: category || '其他模型', description: '管理此能力所需的模型连接', icon: Settings }
 }
 
-function optionLabel(key) {
-  const labels = { submit_path: '提交路径', status_path: '状态路径', result_path: '结果路径' }
-  return labels[key] || key.replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
-}
-
-function optionPlaceholder(key) {
-  if (/path/i.test(key)) return '/v1/tasks/{task_id}'
-  if (/url|endpoint/i.test(key)) return 'https://api.example.com/v1'
-  return ''
-}
-
-function ApiSettingsDialog({ open, modules, onClose, onSave, onTest, onDiscover }) {
+function ApiSettingsDialog({ open, modules, onClose, onSave, onTest, onDiscover, onCreate, onDelete }) {
   const [selectedId, setSelectedId] = useState('')
+  const [activeCategory, setActiveCategory] = useState('image')
   const [drafts, setDrafts] = useState({})
   const [busy, setBusy] = useState('')
   const [messages, setMessages] = useState({})
-  const initialized = useRef(false)
+  const [createForm, setCreateForm] = useState({ name: '', api_url: '', api_key: '', model: '' })
+  const [createDetection, setCreateDetection] = useState(null)
   const dialogRef = useDialogFocus(open, onClose)
   useEffect(() => {
-    if (!open) { initialized.current = false; return }
-    if (initialized.current || !modules.length) return
-    const next = Object.fromEntries(modules.map((module) => [module.id, { ...module, api_key: '', clear_api_key: false, options: { ...(module.options || {}) } }]))
-    setDrafts(next)
-    setSelectedId((current) => next[current] ? current : modules[0]?.id || '')
-    setMessages({})
-    initialized.current = true
+    if (!open) return
+    setDrafts((current) => {
+      const next = { ...current }
+      for (const module of modules) {
+        if (!next[module.id]) next[module.id] = { ...module, api_key: '', clear_api_key: false, options: { ...(module.options || {}) } }
+      }
+      for (const id of Object.keys(next)) {
+        if (!modules.some((module) => module.id === id)) delete next[id]
+      }
+      return next
+    })
+    setSelectedId((current) => modules.some((module) => module.id === current) ? current : (modules[0]?.id || ''))
+    setActiveCategory((current) => API_CATEGORY_META[current] ? current : (modules[0]?.category || 'image'))
   }, [open, modules])
+  useEffect(() => {
+    if (!open) {
+      setCreateForm({ name: '', api_url: '', api_key: '', model: '' })
+      setCreateDetection(null)
+      setMessages({})
+    }
+  }, [open])
   if (!open) return null
-  const selected = drafts[selectedId]
-  if (!selected) return <div ref={dialogRef} tabIndex={-1} className="prompt-sheet" role="dialog" aria-modal="true" aria-label="API 配置"><div className="prompt-dialog settings-dialog"><div className="dialog-heading"><div><h2>API 配置</h2><p>正在加载模块配置。</p></div><button className="icon-button" type="button" onClick={onClose} title="关闭" aria-label="关闭 API 配置"><X size={17} /></button></div></div></div>
+  const groupedModules = modules.reduce((groups, module) => {
+    const category = module.category || 'other'
+    if (!groups[category]) groups[category] = []
+    groups[category].push(module)
+    return groups
+  }, {})
+  const categories = [...Object.keys(API_CATEGORY_META), ...Object.keys(groupedModules).filter((category) => !API_CATEGORY_META[category])]
+  const selectedCategory = API_CATEGORY_META[activeCategory] ? activeCategory : (categories[0] || 'image')
+  const categoryModules = groupedModules[selectedCategory] || []
+  const selected = drafts[selectedId] && drafts[selectedId].category === selectedCategory ? drafts[selectedId] : null
+  const updateCreate = (key, value) => {
+    setCreateForm((current) => ({ ...current, [key]: value }))
+    if (key === 'api_url' || key === 'api_key') setCreateDetection(null)
+  }
+  const handleDetectCreate = async () => {
+    setBusy('detect')
+    setMessages((current) => ({ ...current, create: '' }))
+    try {
+      const detected = await detectGateway({
+        api_url: createForm.api_url.trim(),
+        api_key: createForm.api_key,
+        category: selectedCategory,
+        model: createForm.model.trim(),
+      })
+      setCreateDetection(detected)
+      setCreateForm((current) => ({
+        ...current,
+        name: current.name.trim() || detected.suggested_name || '',
+        model: detected.selected_model || current.model,
+      }))
+      setMessages((current) => ({ ...current, create: { ok: true, text: detected.message || '已识别生产网关' } }))
+    } catch (error) {
+      setCreateDetection(null)
+      setMessages((current) => ({ ...current, create: { ok: false, text: error.message } }))
+    } finally { setBusy('') }
+  }
+  const handleCreate = async () => {
+    if (!createDetection) return
+    setBusy('create')
+    setMessages((current) => ({ ...current, create: '' }))
+    try {
+      const created = await onCreate({
+        name: createForm.name.trim() || createDetection.suggested_name,
+        slug: createDetection.suggested_slug,
+        category: selectedCategory,
+        protocol: createDetection.protocol,
+        api_url: createForm.api_url.trim(),
+        api_key: createForm.api_key || undefined,
+        model: createForm.model.trim() || createDetection.selected_model,
+        enabled: true,
+      })
+      setCreateForm({ name: '', api_url: '', api_key: '', model: '' })
+      setCreateDetection(null)
+      setSelectedId(created.id)
+      setMessages((current) => ({ ...current, [created.id]: { ok: true, text: '自定义模块已添加' } }))
+    } catch (error) {
+      setMessages((current) => ({ ...current, create: { ok: false, text: error.message } }))
+    } finally { setBusy('') }
+  }
+  const handleDelete = async () => {
+    if (!selected || selected.kind !== 'custom') return
+    if (!window.confirm(`删除自定义模块「${selected.name}」？此操作不可恢复。`)) return
+    setBusy('delete')
+    try {
+      await onDelete(selected.id)
+      setMessages({})
+    } catch (error) {
+      setMessages((current) => ({ ...current, [selected.id]: { ok: false, text: error.message } }))
+    } finally { setBusy('') }
+  }
   const update = (key, value) => setDrafts((current) => {
     const selectedDraft = current[selectedId]
+    if (!selectedDraft) return current
     const invalidatesCatalog = key === 'api_url' || key === 'api_key' || key === 'model' || key === 'clear_api_key'
     return {
       ...current,
@@ -397,8 +492,8 @@ function ApiSettingsDialog({ open, modules, onClose, onSave, onTest, onDiscover 
       },
     }
   })
-  const updateOption = (key, value) => setDrafts((current) => ({ ...current, [selectedId]: { ...current[selectedId], options: { ...(current[selectedId].options || {}), [key]: value } } }))
   const action = async (kind) => {
+    if (!selected) return
     setBusy(kind)
     setMessages((current) => ({ ...current, [selectedId]: '' }))
     try {
@@ -425,13 +520,16 @@ function ApiSettingsDialog({ open, modules, onClose, onSave, onTest, onDiscover 
       setMessages((current) => ({ ...current, [selectedId]: { ok: false, text: error.message } }))
     } finally { setBusy('') }
   }
-  const discoveredModels = selected.discovered_models || []
-  const moduleMessage = messages[selectedId]
-  const statusText = moduleMessage ? (moduleMessage.ok ? '连接成功' : '连接失败') : selected.api_key_configured ? '已配置' : '未配置'
+  const discoveredModels = selected?.discovered_models || []
+  const createModels = createDetection?.models || []
+  const moduleMessage = selected ? messages[selectedId] : null
+  const createMessage = messages.create
+  const statusText = moduleMessage ? (moduleMessage.ok ? '连接成功' : '连接失败') : selected?.api_key_configured ? '已配置' : '未配置'
   const tabId = (id) => `api-tab-${id.replace(/[^a-z0-9_-]/gi, '-')}`
   const panelId = (id) => `api-panel-${id.replace(/[^a-z0-9_-]/gi, '-')}`
   const handleTabKeyDown = (event) => {
     const currentIndex = categoryModules.findIndex((module) => module.id === selectedId)
+    if (currentIndex < 0 || !categoryModules.length) return
     let nextIndex = currentIndex
     if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % categoryModules.length
     else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + categoryModules.length) % categoryModules.length
@@ -442,45 +540,29 @@ function ApiSettingsDialog({ open, modules, onClose, onSave, onTest, onDiscover 
     setSelectedId(categoryModules[nextIndex].id)
     event.currentTarget.parentElement?.querySelectorAll('[role="tab"]')[nextIndex]?.focus()
   }
-  const groupedModules = modules.reduce((groups, module) => {
-    const category = module.category || 'other'
-    if (!groups[category]) groups[category] = []
-    groups[category].push(module)
-    return groups
-  }, {})
-  const categories = [...Object.keys(API_CATEGORY_META), ...Object.keys(groupedModules).filter((category) => !API_CATEGORY_META[category])]
-  const availableCategories = categories.filter((category) => (groupedModules[category] || []).length)
-  const selectedCategory = selected.category || (categories.find((category) => groupedModules[category]?.length) || categories[0] || 'other')
-  const categoryModules = groupedModules[selectedCategory] || []
   const categoryMeta = apiCategoryMeta(selectedCategory)
   const CategoryIcon = categoryMeta.icon
-  const moduleOptions = Object.entries(selected.options || {})
   const handleCategoryKeyDown = (event) => {
-    const currentIndex = availableCategories.indexOf(selectedCategory)
+    const currentIndex = categories.indexOf(selectedCategory)
     if (currentIndex < 0) return
     let nextIndex = currentIndex
-    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % availableCategories.length
-    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + availableCategories.length) % availableCategories.length
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % categories.length
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + categories.length) % categories.length
     else if (event.key === 'Home') nextIndex = 0
-    else if (event.key === 'End') nextIndex = availableCategories.length - 1
+    else if (event.key === 'End') nextIndex = categories.length - 1
     else return
     event.preventDefault()
-    const nextCategory = availableCategories[nextIndex]
+    const nextCategory = categories[nextIndex]
+    setActiveCategory(nextCategory)
     const nextModule = groupedModules[nextCategory]?.[0]
-    if (!nextModule) return
-    setSelectedId(nextModule.id)
-    event.currentTarget.parentElement?.querySelectorAll('[role="tab"]')[categories.indexOf(nextCategory)]?.focus()
-  }
-  const renderModuleOption = ([key, value]) => {
-    if (typeof value === 'boolean') {
-      return <label className="checkbox-field api-option-toggle" key={key}><input type="checkbox" checked={value} onChange={(event) => updateOption(key, event.target.checked)} /><span>{optionLabel(key)}</span></label>
-    }
-    return <InputField key={key} type={typeof value === 'number' ? 'number' : 'text'} label={optionLabel(key)} value={String(value ?? '')} onChange={(nextValue) => updateOption(key, nextValue)} placeholder={optionPlaceholder(key)} />
+    if (nextModule) setSelectedId(nextModule.id)
+    setCreateDetection(null)
+    event.currentTarget.parentElement?.querySelectorAll('[role="tab"]')[nextIndex]?.focus()
   }
 
   return <div ref={dialogRef} tabIndex={-1} className="prompt-sheet" role="dialog" aria-modal="true" aria-labelledby="api-settings-title">
     <div className="prompt-dialog api-settings-dialog">
-      <div className="dialog-heading"><div><h2 id="api-settings-title">API 配置</h2><p>按能力管理模型连接，密钥仅发送给本地 AIGC 服务。</p></div><button className="icon-button" type="button" onClick={onClose} title="关闭" aria-label="关闭 API 配置"><X size={17} /></button></div>
+      <div className="dialog-heading"><div><h2 id="api-settings-title">API 配置</h2><p>粘贴生产网关的 API 地址和密钥即可自动匹配协议。密钥仅发送给本地 AIGC 服务。</p></div><button className="icon-button" type="button" onClick={onClose} title="关闭" aria-label="关闭 API 配置"><X size={17} /></button></div>
       <div className="api-category-tabs" role="tablist" aria-label="模型能力分类">
         {categories.map((category) => {
           const meta = apiCategoryMeta(category)
@@ -489,7 +571,7 @@ function ApiSettingsDialog({ open, modules, onClose, onSave, onTest, onDiscover 
           const count = categoryModulesForTab.length
           const ready = categoryModulesForTab.filter((module) => drafts[module.id]?.api_key_configured).length
           const categoryId = `api-category-${category.replace(/[^a-z0-9_-]/gi, '-')}`
-          return <button key={category} id={categoryId} type="button" role="tab" aria-controls="api-category-panel" aria-selected={selectedCategory === category} disabled={!count} className={classNames('api-category-tab', selectedCategory === category && 'is-selected')} onClick={() => count && setSelectedId(categoryModulesForTab[0].id)} onKeyDown={handleCategoryKeyDown}><span className="api-category-icon"><Icon size={17} /></span><span className="api-category-copy"><strong>{meta.label}</strong><small>{count ? `${ready}/${count} 已配置` : '暂无模块'}</small></span></button>
+          return <button key={category} id={categoryId} type="button" role="tab" aria-controls="api-category-panel" aria-selected={selectedCategory === category} className={classNames('api-category-tab', selectedCategory === category && 'is-selected')} onClick={() => { setActiveCategory(category); if (categoryModulesForTab[0]) setSelectedId(categoryModulesForTab[0].id); setCreateDetection(null) }} onKeyDown={handleCategoryKeyDown}><span className="api-category-icon"><Icon size={17} /></span><span className="api-category-copy"><strong>{meta.label}</strong><small>{count ? `${ready}/${count} 已配置` : '可新增模块'}</small></span></button>
         })}
       </div>
       <section id="api-category-panel" role="tabpanel" aria-labelledby={`api-category-${selectedCategory.replace(/[^a-z0-9_-]/gi, '-')}`}>
@@ -497,9 +579,23 @@ function ApiSettingsDialog({ open, modules, onClose, onSave, onTest, onDiscover 
         <div className="api-settings-body">
           <div className="api-module-list" role="tablist" aria-label={`${categoryMeta.label}模块`}>
             {categoryModules.map((module) => <button key={module.id} id={tabId(module.id)} type="button" role="tab" aria-controls={panelId(module.id)} aria-selected={selectedId === module.id} tabIndex={selectedId === module.id ? 0 : -1} className={classNames('api-module-tab', selectedId === module.id && 'is-selected')} onClick={() => setSelectedId(module.id)} onKeyDown={handleTabKeyDown}><span>{module.name}</span><small><span className={classNames('api-module-dot', drafts[module.id]?.api_key_configured && 'is-ready')} />{drafts[module.id]?.api_key_configured ? '已配置' : '未配置'}</small></button>)}
+            <div className="api-create-module">
+              <strong>新增自定义模块</strong>
+              <p className="field-hint">只需填写 API 地址和密钥，系统会识别生产网关并列出可用模型。</p>
+              <InputField label="API 地址" value={createForm.api_url} onChange={(value) => updateCreate('api_url', value)} placeholder="https://ark.cn-beijing.volces.com/api/v3" required />
+              <InputField type="password" autoComplete="new-password" label="API Key" value={createForm.api_key} onChange={(value) => updateCreate('api_key', value)} placeholder="粘贴 API Key" required />
+              <button className="secondary-button" type="button" onClick={handleDetectCreate} disabled={Boolean(busy) || !createForm.api_url.trim() || !createForm.api_key.trim()}>{busy === 'detect' ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busy === 'detect' ? '正在识别' : '识别网关'}</button>
+              {createDetection && <div className="api-detect-result">
+                <p className="api-detect-protocol">{createDetection.label || createDetection.protocol}</p>
+                {createModels.length > 0 ? <label className="field model-select-field"><span className="field-label">可用模型</span><select value={createForm.model || ''} onChange={(event) => updateCreate('model', event.target.value)}>{createForm.model && !createModels.some((model) => model.id === createForm.model) && <option value={createForm.model}>{createForm.model}</option>}{createModels.map((model) => <option key={model.id} value={model.id}>{model.name === model.id ? model.id : `${model.name} (${model.id})`}</option>)}</select></label> : <InputField label="模型 ID" value={createForm.model} onChange={(value) => updateCreate('model', value)} placeholder="网关未返回目录时手动填写" />}
+                <InputField label="显示名称（可选）" value={createForm.name} onChange={(value) => updateCreate('name', value)} placeholder={createDetection.suggested_name || '自动命名'} />
+              </div>}
+              {createMessage && <p className={classNames('dialog-warning', !createMessage.ok && 'is-error')} role="status"><CircleAlert size={16} />{createMessage.text}</p>}
+              <button className="secondary-button" type="button" onClick={handleCreate} disabled={Boolean(busy) || !createDetection || !createForm.api_url.trim() || !createForm.api_key.trim() || !(createForm.model || '').trim()}>{busy === 'create' ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}{busy === 'create' ? '正在添加' : '添加模块'}</button>
+            </div>
           </div>
-          <section id={panelId(selectedId)} role="tabpanel" aria-labelledby={tabId(selectedId)} className="api-module-form">
-          <div className="api-module-title"><div><h3>{selected.name}</h3><p>{selected.id} · {(selected.capabilities || []).join(' · ') || '模型连接'}</p></div><span className={classNames('technical-status', moduleMessage?.ok || (!moduleMessage && selected.api_key_configured) ? 'is-passed' : 'is-failed')}>{statusText}</span></div>
+          {selected ? <section id={panelId(selectedId)} role="tabpanel" aria-labelledby={tabId(selectedId)} className="api-module-form">
+          <div className="api-module-title"><div><h3>{selected.name}</h3><p>{selected.id} · {selected.kind === 'custom' ? '自定义' : '内置'} · {(selected.capabilities || []).join(' · ') || '模型连接'}</p></div><span className={classNames('technical-status', moduleMessage?.ok || (!moduleMessage && selected.api_key_configured) ? 'is-passed' : 'is-failed')}>{statusText}</span></div>
           <div className="settings-grid">
             <InputField label="API 地址" value={selected.api_url || ''} onChange={(value) => update('api_url', value)} placeholder="https://api.example.com/v1" required />
             <div className="model-config-field">
@@ -509,17 +605,17 @@ function ApiSettingsDialog({ open, modules, onClose, onSave, onTest, onDiscover 
             </div>
             <InputField type="password" autoComplete="new-password" label="API Key" value={selected.api_key || ''} onChange={(value) => update('api_key', value)} placeholder={selected.api_key_configured ? '已配置，留空保持不变' : '粘贴 API Key'} />
             <label className="checkbox-field api-enabled"><input type="checkbox" checked={selected.enabled !== false} onChange={(event) => update('enabled', event.target.checked)} /> <span>启用此模块</span></label>
-            {moduleOptions.map(renderModuleOption)}
           </div>
           <label className="checkbox-field"><input type="checkbox" checked={selected.clear_api_key || false} onChange={(event) => update('clear_api_key', event.target.checked)} /> <span>清除已保存的 Key</span></label>
           {moduleMessage && <p className={classNames('dialog-warning', !moduleMessage.ok && 'is-error')} role="status"><CircleAlert size={16} />{moduleMessage.text}</p>}
-            <div className="dialog-actions"><button className="secondary-button" type="button" onClick={onClose} disabled={Boolean(busy)}>取消</button><button className="secondary-button" type="button" onClick={() => action('test')} disabled={Boolean(busy)}>{busy === 'test' ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}测试连接</button><button className="primary-button" type="button" onClick={() => action('save')} disabled={Boolean(busy)}>{busy === 'save' ? <LoaderCircle className="spin" size={16} /> : null}{busy === 'save' ? '正在保存' : '保存配置'}</button></div>
-          </section>
+            <div className="dialog-actions"><button className="secondary-button" type="button" onClick={onClose} disabled={Boolean(busy)}>取消</button>{selected.kind === 'custom' && <button className="secondary-button danger-button" type="button" onClick={handleDelete} disabled={Boolean(busy)}>{busy === 'delete' ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}{busy === 'delete' ? '正在删除' : '删除模块'}</button>}<button className="secondary-button" type="button" onClick={() => action('test')} disabled={Boolean(busy)}>{busy === 'test' ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}测试连接</button><button className="primary-button" type="button" onClick={() => action('save')} disabled={Boolean(busy)}>{busy === 'save' ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存配置</button></div>
+          </section> : <section className="api-module-form"><p className="field-hint">选择左侧模块编辑配置，或粘贴 URL 和密钥新增一个生产网关。</p></section>}
         </div>
       </section>
     </div>
   </div>
 }
+
 
 function BatchDialog({ open, form, assets, onClose, onCreate }) {
   const [prompt, setPrompt] = useState(form.prompt || form.product || '')
@@ -550,7 +646,7 @@ function BatchDialog({ open, form, assets, onClose, onCreate }) {
   </div>
 }
 
-function MixDialog({ open, assets, onClose, onPlan, onCreate }) {
+function MixDialog({ open, assets, modules = [], onClose, onPlan, onCreate }) {
   const [selected, setSelected] = useState([])
   const [aspectRatio, setAspectRatio] = useState('portrait')
   const [imageDuration, setImageDuration] = useState(3)
@@ -579,11 +675,12 @@ function MixDialog({ open, assets, onClose, onPlan, onCreate }) {
     setCreating(true)
     try { await onCreate({ clips, aspectRatio, objective, transitionMode, plan }); onClose() } catch (error) { setMessage(error.message) } finally { setCreating(false) }
   }
-  const plannerName = plan?.planner === 'codex_terra' ? 'Codex 5.6 Terra' : '本地规则'
+  const plannerModule = mixPlannerModule(modules)
+  const plannerName = plan?.planner === 'codex_terra' ? (plannerModule?.name || 'Codex 5.6 Terra') : '本地规则'
   const durationLabel = (clip) => `${Math.round(((clip.end_ms ? clip.end_ms - clip.start_ms : clip.duration_ms) || 0) / 100) / 10} 秒`
   return <div ref={dialogRef} tabIndex={-1} className="prompt-sheet" role="dialog" aria-modal="true" aria-label="智能混剪">
     <div className="prompt-dialog batch-dialog">
-      <div className="dialog-heading"><div><h2>智能混剪</h2><p>根据目标与素材顺序生成剪辑计划，再由本地 FFmpeg 执行。</p></div><button className="icon-button" type="button" onClick={onClose} title="关闭"><X size={17} /></button></div>
+      <div className="dialog-heading"><div><h2>智能混剪</h2><p>根据目标与素材顺序生成剪辑计划，再由本地 FFmpeg 执行。{plannerModule ? `当前规划器：${plannerModule.name}` : '未配置智能规划时将使用本地规则。'}</p></div><button className="icon-button" type="button" onClick={onClose} title="关闭"><X size={17} /></button></div>
       <InputField label="剪辑目标" value={objective} onChange={(value) => { resetPlan(); setObjective(value) }} placeholder="例如：节奏紧凑，突出新品细节" />
       <div className="field-grid"><label className="field"><span className="field-label">画幅</span><select value={aspectRatio} onChange={(event) => { resetPlan(); setAspectRatio(event.target.value) }}><option value="portrait">9:16 竖版</option><option value="landscape">16:9 横版</option><option value="square">1:1 方形</option></select></label><label className="field"><span className="field-label">图片时长（秒）</span><input type="number" min="1" max="60" value={imageDuration} onChange={(event) => { resetPlan(); setImageDuration(Math.max(1, Math.min(60, Number(event.target.value) || 3))) }} /></label><label className="field"><span className="field-label">目标时长（秒）</span><input type="number" min="1" max="300" value={targetDuration} onChange={(event) => { resetPlan(); setTargetDuration(Math.max(1, Math.min(300, Number(event.target.value) || 15))) }} /></label><label className="field"><span className="field-label">转场策略</span><select value={transitionMode} onChange={(event) => { resetPlan(); setTransitionMode(event.target.value) }}><option value="auto">自动规划</option><option value="hard_cut">硬切</option><option value="fade">淡入淡出（不可用时回退硬切）</option></select></label></div>
       <div className="asset-select-list"><span className="field-label">素材顺序：{selected.length ? selected.map((id) => assets.find((asset) => asset.id === id)?.name).join(' → ') : '尚未选择'}</span>{assets.length ? assets.slice(0, 100).map((asset) => <label key={asset.id} className="asset-select-item"><input type="checkbox" checked={selected.includes(asset.id)} onChange={(event) => toggle(asset.id, event.target.checked)} />{asset.media_type === 'video' ? <video src={asset.url} muted preload="metadata" /> : <img src={asset.url} alt="" />}<span>{asset.name}</span></label>) : <p className="field-hint">暂无可用素材。请先导入图片或视频，再选择至少两个素材生成计划。</p>}</div>
@@ -1427,6 +1524,22 @@ export default function App() {
   }, [refreshData])
 
   const handleTestModule = useCallback((moduleId, draft) => testModuleSettings(moduleId, draft), [])
+  const handleCreateModule = useCallback(async (payload) => {
+    const created = await createCustomModule(payload)
+    setModuleSettings((current) => [...current.filter((item) => item.id !== created.id), created])
+    await refreshData()
+    return created
+  }, [refreshData])
+  const handleDeleteModule = useCallback(async (moduleId) => {
+    await deleteCustomModule(moduleId)
+    setModuleSettings((current) => current.filter((item) => item.id !== moduleId))
+    setModelCatalog((current) => {
+      const next = { ...current }
+      delete next[moduleId]
+      return next
+    })
+    await refreshData()
+  }, [refreshData])
   const handleDiscoverModels = useCallback(async (moduleId, draft) => {
     const result = await discoverModuleModels(moduleId, draft)
     const selectedModel = result.selected_model || draft.model || ''
@@ -1577,8 +1690,8 @@ export default function App() {
       <section className="workspace" aria-live="polite"><div className="workspace-canvas"><ResultView job={activeJob} modules={moduleSettings} modelCatalog={modelCatalog} assets={assets} r2Status={r2Status} r2Uploading={r2Uploading} r2Message={r2Message} onCopy={copyText} onOpenFolder={handleOpenFolder} onUploadR2={handleUploadR2} /></div><BackgroundTasks batch={batchTask} mix={mixTask} /><History jobs={jobs} activeId={activeJob?.id} onSelect={(job) => { setActiveJob(job); setR2Message('') }} /></section>
     </main>
     <PromptSheet prompt={promptPreview?.prompt} warnings={promptPreview?.warnings || []} fixed={form.workflow === 'model_outfit_swap'} onClose={() => setPromptPreview(null)} onCopy={() => copyText(promptPreview?.prompt)} />
-    <ApiSettingsDialog open={settingsOpen} modules={moduleSettings} onClose={() => setSettingsOpen(false)} onSave={handleSaveModule} onTest={handleTestModule} onDiscover={handleDiscoverModels} />
+    <ApiSettingsDialog open={settingsOpen} modules={moduleSettings} onClose={() => setSettingsOpen(false)} onSave={handleSaveModule} onTest={handleTestModule} onDiscover={handleDiscoverModels} onCreate={handleCreateModule} onDelete={handleDeleteModule} />
     <BatchDialog open={batchOpen} form={form} assets={assets} onClose={() => setBatchOpen(false)} onCreate={handleCreateBatch} />
-    <MixDialog open={mixOpen} assets={assets} onClose={() => setMixOpen(false)} onPlan={handlePlanMix} onCreate={handleCreateMix} />
+    <MixDialog open={mixOpen} assets={assets} modules={moduleSettings} onClose={() => setMixOpen(false)} onPlan={handlePlanMix} onCreate={handleCreateMix} />
   </div>
 }
