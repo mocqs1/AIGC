@@ -1,6 +1,5 @@
 import json
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,7 +25,6 @@ def _extract_ps_function(source: str, name: str) -> str:
             if depth == 0:
                 return source[start : index + 1]
     raise AssertionError(f"unclosed PowerShell function {name}")
-
 
 
 def _powershell(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -94,11 +92,13 @@ class RuntimeBootstrapTests(unittest.TestCase):
 
     def test_native_exit_code_ignores_command_stdout(self):
         source = START_STUDIO.read_text(encoding="utf-8")
+        convert_line = _extract_ps_function(source, "Convert-NativeOutputLine")
         invoke_native = _extract_ps_function(source, "Invoke-Native")
         assert_exit = _extract_ps_function(source, "Assert-LastExitCode")
         command = (
             "$ErrorActionPreference = 'Stop'\n"
             "Set-StrictMode -Version Latest\n"
+            f"{convert_line}\n"
             f"{invoke_native}\n"
             f"{assert_exit}\n"
             "$code = Invoke-Native -FilePath $env:ComSpec -ArgumentList @('/c', 'echo pip-like line 1&echo pip-like line 2')\n"
@@ -131,6 +131,54 @@ if (-not $oldThrew) { throw 'expected PowerShell Stop to treat python stderr as 
         result = _powershell("-Command", command)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PROBE_OK", result.stdout)
+
+    def test_python_install_plans_include_direct_and_mirror_fallbacks(self):
+        source = START_STUDIO.read_text(encoding="utf-8")
+        get_plans = _extract_ps_function(source, "Get-PythonPackageInstallPlans")
+        get_npm = _extract_ps_function(source, "Get-NpmInstallPlans")
+        command = (
+            "$ErrorActionPreference = 'Stop'\n"
+            "Set-StrictMode -Version Latest\n"
+            f"{get_plans}\n"
+            f"{get_npm}\n"
+            "$plans = @(Get-PythonPackageInstallPlans)\n"
+            "if ($plans.Count -lt 3) { throw 'expected multiple pip fallbacks' }\n"
+            "$names = @($plans | ForEach-Object { $_.name })\n"
+            "if ($names -notcontains 'direct connection') { throw 'missing direct pip fallback' }\n"
+            "if ($names -notcontains 'Tsinghua PyPI mirror') { throw 'missing Tsinghua fallback' }\n"
+            "$direct = $plans | Where-Object { $_.name -eq 'direct connection' }\n"
+            "if (-not $direct.clearProxy) { throw 'direct pip plan must clear proxy env' }\n"
+            "if (@($direct.arguments) -notcontains '--proxy') { throw 'direct pip plan must pass empty --proxy' }\n"
+            "$npmPlans = @(Get-NpmInstallPlans -WebRoot 'C:\\temp\\web')\n"
+            "$npmNames = @($npmPlans | ForEach-Object { $_.name })\n"
+            "if ($npmNames -notcontains 'npmmirror registry') { throw 'missing npm mirror fallback' }\n"
+            "'PLANS_OK'\n"
+        )
+        result = _powershell("-Command", command)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PLANS_OK", result.stdout)
+
+    def test_without_proxy_env_restores_original_values(self):
+        source = START_STUDIO.read_text(encoding="utf-8")
+        get_names = _extract_ps_function(source, "Get-ProxyEnvironmentNames")
+        without_proxy = _extract_ps_function(source, "Invoke-WithoutProxyEnv")
+        command = (
+            "$ErrorActionPreference = 'Stop'\n"
+            "Set-StrictMode -Version Latest\n"
+            f"{get_names}\n"
+            f"{without_proxy}\n"
+            "$env:HTTP_PROXY = 'http://127.0.0.1:8'\n"
+            "$env:HTTPS_PROXY = 'http://127.0.0.1:9'\n"
+            "$inside = Invoke-WithoutProxyEnv { [ordered]@{ http = [string]$env:HTTP_PROXY; https = [string]$env:HTTPS_PROXY } }\n"
+            "if (-not [string]::IsNullOrWhiteSpace([string]$inside.https)) { throw ('https proxy still visible inside: ' + $inside.https) }\n"
+            "if (-not [string]::IsNullOrWhiteSpace([string]$inside.http)) { throw ('http proxy still visible inside: ' + $inside.http) }\n"
+            "if ($env:HTTPS_PROXY -ne 'http://127.0.0.1:9') { throw ('https proxy was not restored: ' + $env:HTTPS_PROXY) }\n"
+            "if ($env:HTTP_PROXY -ne 'http://127.0.0.1:8') { throw ('http proxy was not restored: ' + $env:HTTP_PROXY) }\n"
+            "'PROXY_OK'\n"
+        )
+        result = _powershell("-Command", command)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PROXY_OK", result.stdout)
 
 
 if __name__ == "__main__":

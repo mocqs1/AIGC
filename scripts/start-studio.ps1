@@ -106,6 +106,13 @@ function Invoke-RuntimeEnsure {
     return $jsonLine | ConvertFrom-Json
 }
 
+function Convert-NativeOutputLine {
+    param($Line)
+    if ($Line -is [System.Management.Automation.ErrorRecord]) {
+        return [string]$Line.ToString()
+    }
+    return [string]$Line
+}
 
 function Invoke-Native {
     param(
@@ -124,7 +131,10 @@ function Invoke-Native {
         }
         if (-not $Quiet) {
             foreach ($line in @($output)) {
-                Write-Host ([string]$line)
+                $text = Convert-NativeOutputLine -Line $line
+                if (-not [string]::IsNullOrWhiteSpace($text) -and $text -notmatch 'RemoteException') {
+                    Write-Host $text
+                }
             }
         }
         return ,$code
@@ -156,6 +166,148 @@ function Test-PythonPackages {
     return (Invoke-Native -FilePath $Python -ArgumentList @("-c", $probe) -Quiet) -eq 0
 }
 
+function Get-ProxyEnvironmentNames {
+    @(
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "PIP_PROXY",
+        "NPM_CONFIG_PROXY",
+        "NPM_CONFIG_HTTPS_PROXY"
+    )
+}
+
+function Invoke-WithoutProxyEnv {
+    param([Parameter(Mandatory)][scriptblock]$Script)
+
+    $saved = New-Object System.Collections.Generic.List[object]
+    foreach ($name in Get-ProxyEnvironmentNames) {
+        $saved.Add([pscustomobject]@{
+            Name = $name
+            Value = [Environment]::GetEnvironmentVariable($name, "Process")
+        }) | Out-Null
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+        Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
+    }
+    try {
+        return & $Script
+    }
+    finally {
+        foreach ($item in $saved) {
+            if ($null -ne $item.Value -and $item.Value -ne "") {
+                [Environment]::SetEnvironmentVariable($item.Name, $item.Value, "Process")
+                Set-Item -Path "Env:$($item.Name)" -Value $item.Value
+            }
+        }
+    }
+}
+
+function Get-PythonPackageInstallPlans {
+    @(
+        [ordered]@{
+            name = "current network"
+            clearProxy = $false
+            arguments = @("-m", "pip", "install", "--disable-pip-version-check", "-r")
+        },
+        [ordered]@{
+            name = "direct connection"
+            clearProxy = $true
+            arguments = @("-m", "pip", "install", "--disable-pip-version-check", "--proxy", "", "-r")
+        },
+        [ordered]@{
+            name = "Tsinghua PyPI mirror"
+            clearProxy = $true
+            arguments = @(
+                "-m", "pip", "install", "--disable-pip-version-check", "--proxy", "",
+                "-i", "https://pypi.tuna.tsinghua.edu.cn/simple",
+                "--trusted-host", "pypi.tuna.tsinghua.edu.cn", "-r"
+            )
+        },
+        [ordered]@{
+            name = "Aliyun PyPI mirror"
+            clearProxy = $true
+            arguments = @(
+                "-m", "pip", "install", "--disable-pip-version-check", "--proxy", "",
+                "-i", "https://mirrors.aliyun.com/pypi/simple",
+                "--trusted-host", "mirrors.aliyun.com", "-r"
+            )
+        }
+    )
+}
+
+function Get-NpmInstallPlans {
+    param([Parameter(Mandatory)][string]$WebRoot)
+    @(
+        [ordered]@{
+            name = "current network"
+            clearProxy = $false
+            arguments = @("install", "--prefix", $WebRoot)
+        },
+        [ordered]@{
+            name = "direct connection"
+            clearProxy = $true
+            arguments = @("install", "--prefix", $WebRoot)
+        },
+        [ordered]@{
+            name = "npmmirror registry"
+            clearProxy = $true
+            arguments = @("install", "--prefix", $WebRoot, "--registry", "https://registry.npmmirror.com")
+        }
+    )
+}
+
+function Invoke-InstallPlan {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)]$Plan,
+        [object[]]$ArgumentList
+    )
+
+    Write-Host "Trying $($Plan.name)..."
+    if ($Plan.clearProxy) {
+        return Invoke-WithoutProxyEnv { Invoke-Native -FilePath $FilePath -ArgumentList $ArgumentList }
+    }
+    return Invoke-Native -FilePath $FilePath -ArgumentList $ArgumentList
+}
+
+function Install-PythonPackages {
+    param(
+        [Parameter(Mandatory)][string]$Python,
+        [Parameter(Mandatory)][string]$RequirementsPath
+    )
+
+    foreach ($plan in Get-PythonPackageInstallPlans) {
+        $arguments = @($plan.arguments) + @($RequirementsPath)
+        $code = Invoke-InstallPlan -FilePath $Python -Plan $plan -ArgumentList $arguments
+        if ($code -eq 0 -and (Test-PythonPackages -Python $Python)) {
+            return
+        }
+        Write-Host "Python package install via $($plan.name) failed (exit code $code)."
+    }
+
+    throw "Python dependency installation failed. pip could not reach a package index, usually because a system HTTP proxy is set but unreachable. Turn off the unused proxy or set a working HTTP_PROXY/HTTPS_PROXY, then run start-aigc.bat again."
+}
+
+function Install-NpmPackages {
+    param(
+        [Parameter(Mandatory)][string]$Npm,
+        [Parameter(Mandatory)][string]$WebRoot
+    )
+
+    foreach ($plan in Get-NpmInstallPlans -WebRoot $WebRoot) {
+        $code = Invoke-InstallPlan -FilePath $Npm -Plan $plan -ArgumentList @($plan.arguments)
+        if ($code -eq 0 -and (Test-Path -LiteralPath (Join-Path $WebRoot "node_modules"))) {
+            return
+        }
+        Write-Host "Web dependency install via $($plan.name) failed (exit code $code)."
+    }
+
+    throw "Web dependency installation failed. npm could not reach a registry, usually because a system HTTP proxy is set but unreachable."
+}
+
 if (Test-Path -LiteralPath $portPath) {
     $savedPort = 0
     if ([int]::TryParse((Get-Content -LiteralPath $portPath -Raw).Trim(), [ref]$savedPort) -and $savedPort -gt 0 -and $savedPort -le 65535) {
@@ -184,18 +336,14 @@ Write-Host "Using Node.js $($runtime.nodeMajor) at $node"
 Write-Host "[2/4] Checking Python dependencies..."
 if (-not (Test-PythonPackages -Python $python)) {
     Write-Host "Installing Python dependencies..."
-    Assert-LastExitCode -Action "pip upgrade" -ExitCode (Invoke-Native -FilePath $python -ArgumentList @("-m", "pip", "install", "--upgrade", "pip"))
-    Assert-LastExitCode -Action "Python dependency installation" -ExitCode (Invoke-Native -FilePath $python -ArgumentList @("-m", "pip", "install", "-r", $requirementsPath))
-    if (-not (Test-PythonPackages -Python $python)) {
-        throw "Python dependency verification failed."
-    }
+    Install-PythonPackages -Python $python -RequirementsPath $requirementsPath
 }
 
 Write-Host "[3/4] Preparing the web application..."
 $npmList = Invoke-Native -FilePath $npm -ArgumentList @("ls", "--prefix", $webRoot, "--depth=0") -Quiet
 if (-not (Test-Path -LiteralPath (Join-Path $webRoot "node_modules")) -or $npmList -ne 0) {
     Write-Host "Installing web dependencies..."
-    Assert-LastExitCode -Action "Web dependency installation" -ExitCode (Invoke-Native -FilePath $npm -ArgumentList @("install", "--prefix", $webRoot))
+    Install-NpmPackages -Npm $npm -WebRoot $webRoot
 }
 
 if (-not $Dev) {
