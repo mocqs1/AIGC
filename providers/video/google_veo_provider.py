@@ -16,6 +16,8 @@ from urllib.parse import quote, urlparse
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from providers.http_safety import safe_urlopen
+from providers.credential_parser import parse_api_key, parse_api_url
+
 
 from .rest_client import (
     RestVideoClient,
@@ -133,15 +135,15 @@ class GoogleVeoClient:
     ) -> None:
         from .rest_client import _setting
 
-        configured_key = api_key or _setting("VEO_API_KEY")
+        configured_key = parse_api_key(api_key or _setting("VEO_API_KEY") or "")
         if not configured_key:
             raise VideoProviderConfigurationError(
                 "VEO_API_KEY is required; set it in the environment or project .env"
             )
         if timeout <= 0:
             raise ValueError("timeout must be greater than zero")
-        self.api_key = configured_key.strip()
-        self.api_url = (api_url or _setting("VEO_API_URL") or self.default_api_url).strip().rstrip("/")
+        self.api_key = configured_key
+        self.api_url = parse_api_url(api_url or _setting("VEO_API_URL") or self.default_api_url)
         self.model = (model or _setting("VEO_MODEL") or self.default_model).strip()
         if not self.model:
             raise ValueError("Veo model must be a non-empty string")

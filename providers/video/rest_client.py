@@ -20,6 +20,8 @@ from urllib.parse import quote
 from urllib.request import Request
 
 from providers.http_safety import safe_urlopen
+from providers.credential_parser import parse_api_key, parse_api_url
+
 
 
 logger = logging.getLogger(__name__)
@@ -113,7 +115,7 @@ class RestVideoClient:
         request_logger: logging.Logger | None = None,
     ) -> None:
         prefix = self.provider_name.upper()
-        configured_key = api_key or _setting(f"{prefix}_API_KEY")
+        configured_key = parse_api_key(api_key or _setting(f"{prefix}_API_KEY") or "")
         if not configured_key:
             raise VideoProviderConfigurationError(
                 f"{prefix}_API_KEY is required; set it in the environment or project .env"
@@ -125,8 +127,8 @@ class RestVideoClient:
             )
         if timeout <= 0:
             raise ValueError("timeout must be greater than zero")
-        self.api_key = configured_key.strip()
-        self.api_url = configured_url.strip().rstrip("/")
+        self.api_key = configured_key
+        self.api_url = parse_api_url(configured_url)
         self.submit_path = submit_path or _setting(f"{prefix}_SUBMIT_PATH", "/v1/videos")
         self.status_path = status_path or _setting(
             f"{prefix}_STATUS_PATH", "/v1/videos/{task_id}"

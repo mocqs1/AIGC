@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from config import env_value
+from providers.credential_parser import parse_api_url
 
 from .rest_client import RestVideoClient
 
@@ -70,7 +71,12 @@ class SeedanceClient(RestVideoClient):
     ) -> None:
         configured_url = str(kwargs.get("api_url") or env_value("SEEDANCE_API_URL", "") or "")
         configured_model = str(text_model or env_value("SEEDANCE_TEXT_MODEL", "") or "")
-        hostname = (urlparse(configured_url).hostname or "").lower().rstrip(".")
+        if configured_url.strip():
+            try:
+                kwargs["api_url"] = parse_api_url(configured_url)
+            except ValueError:
+                pass
+        hostname = (urlparse(str(kwargs.get("api_url") or configured_url)).hostname or "").lower().rstrip(".")
         self.uses_ark = hostname == "ark.cn-beijing.volces.com" or configured_model.lower().startswith("doubao-seedance-")
 
         if self.uses_ark:
@@ -92,7 +98,8 @@ class SeedanceClient(RestVideoClient):
         self.image_model = image_model or env_value(
             "SEEDANCE_IMAGE_MODEL", self.text_model if self.uses_ark else "seedance-2.5-image-to-video"
         )
-        self.upload_api_url = (upload_api_url or env_value("SEEDANCE_UPLOAD_API_URL", DEFAULT_UPLOAD_API_URL) or DEFAULT_UPLOAD_API_URL).strip().rstrip("/")
+        upload_url = upload_api_url or env_value("SEEDANCE_UPLOAD_API_URL", DEFAULT_UPLOAD_API_URL) or DEFAULT_UPLOAD_API_URL
+        self.upload_api_url = parse_api_url(upload_url)
         self.upload_path = upload_path or env_value("SEEDANCE_UPLOAD_PATH", DEFAULT_UPLOAD_PATH)
 
     def _local_image_data_url(self, image: str) -> str:

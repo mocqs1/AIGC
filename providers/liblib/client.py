@@ -14,6 +14,8 @@ from urllib.parse import quote
 from urllib.request import Request
 
 from providers.http_safety import safe_urlopen
+from providers.credential_parser import parse_api_key, parse_api_url
+
 
 
 DEFAULT_API_URL = "https://openapi.liblib.art/api"
@@ -92,10 +94,10 @@ class LiblibClient:
         transport: Transport | None = None,
         request_logger: logging.Logger | None = None,
     ) -> None:
-        configured_key = api_key or os.environ.get("LIBLIB_API_KEY")
-        if not configured_key or not configured_key.strip():
-            configured_key = _dotenv_value("LIBLIB_API_KEY")
-        if not configured_key or not configured_key.strip():
+        configured_key = parse_api_key(api_key or os.environ.get("LIBLIB_API_KEY") or "")
+        if not configured_key:
+            configured_key = parse_api_key(_dotenv_value("LIBLIB_API_KEY") or "")
+        if not configured_key:
             raise LiblibConfigurationError(
                 "LIBLIB_API_KEY is required; set it in the environment or project .env"
             )
@@ -106,8 +108,8 @@ class LiblibClient:
         if timeout <= 0:
             raise ValueError("timeout must be greater than zero")
 
-        self.api_key = configured_key.strip()
-        self.api_url = configured_url.strip().rstrip("/")
+        self.api_key = configured_key
+        self.api_url = parse_api_url(configured_url)
         configured_model = model if model is not None else (
             os.environ.get("LIBLIB_MODEL") or _dotenv_value("LIBLIB_MODEL") or ""
         )

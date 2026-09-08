@@ -15,6 +15,8 @@ from urllib.request import Request
 
 from config import env_value
 from providers.http_safety import safe_urlopen
+from providers.credential_parser import parse_api_key, parse_api_url
+
 
 
 class TerraPlannerError(RuntimeError):
@@ -38,8 +40,8 @@ class CodexTerraPlanner:
         pinned_ip: str | None = None,
         transport: Callable[[Request], bytes] | None = None,
     ) -> None:
-        self.api_url = api_url.strip()
-        self.api_key = api_key.strip()
+        self.api_url = parse_api_url(api_url)
+        self.api_key = parse_api_key(api_key)
         self.model = model.strip() or "gpt-5.6-terra"
         self.proxy_url = (env_value("CODEX_TERRA_PROXY_URL", "") if proxy_url is None else proxy_url or "").strip()
         self.pinned_ip = (env_value("CODEX_TERRA_PINNED_IP", "") if pinned_ip is None else pinned_ip or "").strip()

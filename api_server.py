@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from agents.prompt_agent import generate_prompt
 from config import OUTPUTS_DIR, PROJECT_ROOT, env_value
+from providers.credential_parser import parse_api_key, parse_api_url, parse_provider_settings
 from main import generate_image, generate_video
 from skills.shapewear_video_generator.runtime import (
     ShapewearRequestError,
@@ -344,6 +345,30 @@ class R2UploadRequest(BaseModel):
         return value.strip() if value else None
 
 
+def _normalize_pasted_settings_payload(value: Any) -> Any:
+    """Accept console/curl pastes without changing the write-only key contract."""
+    if not isinstance(value, Mapping):
+        return value
+    payload = dict(value)
+    url = payload.get("api_url")
+    key = payload.get("api_key")
+    parsed_key = parse_api_key(key) if isinstance(key, str) or key is None else ""
+    if parsed_key:
+        payload["api_key"] = parsed_key
+    elif isinstance(key, str):
+        payload["api_key"] = None
+    if not isinstance(url, str):
+        return payload
+    try:
+        parsed_url, recovered_key = parse_provider_settings(url, parsed_key or None)
+    except ValueError:
+        return payload
+    payload["api_url"] = parsed_url
+    if recovered_key:
+        payload["api_key"] = recovered_key
+    return payload
+
+
 class HermesSettingsRequest(BaseModel):
     api_url: str = Field(min_length=1, max_length=2048)
     api_key: str | None = Field(default=None, max_length=4096)
@@ -355,6 +380,11 @@ class HermesSettingsRequest(BaseModel):
     result_path: str = Field(default="/images/generations/{task_id}", max_length=512)
     timeout: float = Field(default=480.0, gt=0, le=600)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_pasted_credentials(cls, value: Any) -> Any:
+        return _normalize_pasted_settings_payload(value)
+
 
 class ModuleSettingsRequest(BaseModel):
     api_url: str = Field(min_length=1, max_length=2048)
@@ -363,6 +393,11 @@ class ModuleSettingsRequest(BaseModel):
     model: str = Field(default="", max_length=256)
     enabled: bool = True
     options: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_pasted_credentials(cls, value: Any) -> Any:
+        return _normalize_pasted_settings_payload(value)
 
     @field_validator("api_url", "model")
     @classmethod
@@ -1197,7 +1232,7 @@ def _is_private_network_target(host: str) -> bool:
 
 def _validate_outbound_api_url(value: str) -> str:
     """Validate configured endpoints before any provider client uses them."""
-    parsed = urlparse(value.strip())
+    parsed = urlparse(parse_api_url(value))
     host = parsed.hostname
     if parsed.scheme.lower() not in {"http", "https"} or not host or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("API 地址必须是无凭据、无查询参数的 HTTP 或 HTTPS URL")
@@ -1340,6 +1375,12 @@ def _module_settings(module_id: str, *, include_key: bool = False) -> dict[str, 
                 defaults["api_key"] = ""
         elif "api_key" in stored:
             defaults["api_key"] = ""
+    try:
+        defaults["api_url"] = parse_api_url(str(defaults.get("api_url") or ""))
+    except ValueError:
+        pass
+    if defaults.get("api_key"):
+        defaults["api_key"] = parse_api_key(str(defaults["api_key"]))
     if include_key:
         return defaults
     return {key: value for key, value in defaults.items() if key != "api_key"} | {"api_key_configured": bool(defaults["api_key"])}
@@ -1410,7 +1451,7 @@ def _write_module_settings(module_id: str, request: ModuleSettingsRequest) -> di
         raise ValueError("此模块不支持该配置选项")
     _validate_module_options(module_id, request.options)
     current = _module_settings(module_id, include_key=True)
-    api_key = "" if request.clear_api_key else ((request.api_key or "").strip() or current["api_key"])
+    api_key = "" if request.clear_api_key else (parse_api_key(request.api_key) or current["api_key"])
     record = _module_env_defaults(module_id) | {
         "id": module_id,
         "api_url": api_url,
@@ -1954,7 +1995,7 @@ def test_hermes_settings(request: HermesSettingsRequest | None = None) -> dict[s
             current = _module_settings("image.hermes", include_key=True)
             values = request.model_dump(exclude={"clear_api_key", "api_key"})
             _validate_outbound_api_url(values["api_url"])
-            values["api_key"] = "" if request.clear_api_key else ((request.api_key or "").strip() or current["api_key"])
+            values["api_key"] = "" if request.clear_api_key else (parse_api_key(request.api_key) or current["api_key"])
             client = HermesClient(**values)
         client.test_connection()
     except (HermesClientError, ValueError) as error:
@@ -1995,7 +2036,7 @@ def test_module_settings(module_id: str, request: ModuleSettingsRequest) -> dict
         raise HTTPException(status_code=400, detail={"code": "invalid_settings", "message": str(error)}) from error
     try:
         current = _module_settings(module_id, include_key=True)
-        api_key = "" if request.clear_api_key else ((request.api_key or "").strip() or current["api_key"])
+        api_key = "" if request.clear_api_key else (parse_api_key(request.api_key) or current["api_key"])
         if not api_key:
             raise ValueError("API Key 未配置")
         _module_draft_client(module_id, request, api_key).test_connection()
@@ -2016,7 +2057,7 @@ def discover_module_models(module_id: str, request: ModuleSettingsRequest) -> di
     try:
         _validate_module_draft(module_id, request)
         current = _module_settings(module_id, include_key=True)
-        api_key = "" if request.clear_api_key else ((request.api_key or "").strip() or current["api_key"])
+        api_key = "" if request.clear_api_key else (parse_api_key(request.api_key) or current["api_key"])
         if not api_key:
             raise ValueError("API Key is required for model discovery")
     except KeyError as error:

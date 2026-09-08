@@ -23,6 +23,8 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request
 
 from providers.http_safety import safe_urlopen
+from providers.credential_parser import parse_api_key, parse_api_url
+
 
 
 # Ark's Seedream image endpoint uses one ordered ``image`` input instead of
@@ -94,9 +96,10 @@ class HermesClient:
         transport=None,
         request_logger: logging.Logger | None = None,
     ) -> None:
-        if not api_url or not api_url.strip():
-            raise HermesConfigurationError("Hermes API 鍦板潃涓嶈兘涓虹┖")
-        if not api_key or not api_key.strip():
+        if not api_url or not str(api_url).strip():
+            raise HermesConfigurationError("Hermes API 地址不能为空")
+        parsed_key = parse_api_key(api_key)
+        if not parsed_key:
             raise HermesConfigurationError("Hermes API key is not configured")
         try:
             timeout_value = float(timeout)
@@ -104,8 +107,8 @@ class HermesClient:
             raise ValueError("timeout must be a finite number") from error
         if not math.isfinite(timeout_value) or timeout_value <= 0:
             raise ValueError("timeout must be a finite number greater than zero")
-        self.api_url = api_url.strip().rstrip("/")
-        self.api_key = api_key.strip()
+        self.api_url = parse_api_url(api_url)
+        self.api_key = parsed_key
         self.model = (model or "gpt-image-2").strip()
         self.submit_path = submit_path or "/images/generations"
         self.edit_path = edit_path or "/images/edits"

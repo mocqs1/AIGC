@@ -436,10 +436,41 @@ class ApiServerTests(unittest.TestCase):
         getaddrinfo.return_value = [(2, 1, 6, "", ("10.0.0.8", 443))]
         dns_private = self.client.put("/api/settings/modules/mix.codex_terra", json={"api_url": "https://planner.example/v1", "api_key": "key", "model": "gpt-5.6-terra"})
         self.assertEqual(dns_private.status_code, 400)
-        for url in ("http://127.0.0.1/v1", "https://user:pass@example.test/v1", "https://example.test/v1?api_key=key", "https://example.test/v1#token"):
+        for url in ("http://127.0.0.1/v1", "https://example.test/v1?foo=bar"):
             with self.subTest(url=url):
                 response = self.client.put("/api/settings/modules/image.liblib", json={"api_url": url, "api_key": "key"})
                 self.assertEqual(response.status_code, 400)
+
+    def test_module_settings_accept_pasted_url_and_key_wrappers(self) -> None:
+        response = self.client.put(
+            "/api/settings/modules/image.hermes",
+            json={
+                "api_url": 'curl https://8.8.8.8/v1/images/generations?api_key=leaked-secret -H "Authorization: Bearer unused"',
+                "api_key": "Bearer \ufeffsk-pasted-key\u200b",
+                "model": "image-model",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["api_url"], "https://8.8.8.8/v1")
+        self.assertNotIn("sk-pasted-key", response.text)
+        self.assertNotIn("leaked-secret", response.text)
+        stored = api_server._module_settings("image.hermes", include_key=True)
+        self.assertEqual(stored["api_url"], "https://8.8.8.8/v1")
+        self.assertEqual(stored["api_key"], "sk-pasted-key")
+
+        recovered = self.client.put(
+            "/api/settings/modules/image.liblib",
+            json={
+                "api_url": "https://8.8.8.8/api/v3?api_key=query-secret",
+                "api_key": "",
+                "model": "doubao-seedream-5-0-pro-260628",
+            },
+        )
+        self.assertEqual(recovered.status_code, 200, recovered.text)
+        self.assertEqual(
+            api_server._module_settings("image.liblib", include_key=True)["api_key"],
+            "query-secret",
+        )
 
     @patch("api_server.GoogleVeoClient.test_connection", return_value={"ok": True})
     def test_module_test_does_not_persist_draft_key(self, _probe) -> None:
