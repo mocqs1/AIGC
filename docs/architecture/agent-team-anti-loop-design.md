@@ -1,7 +1,7 @@
 # Agent and Team Anti-Loop Design
 
-Status: proposed
-Date: 2026-08-29
+Status: implemented control plane, remaining adapter wiring
+Date: 2026-09-08
 Owner: AIGC Lead Codex
 
 ## Problem
@@ -122,6 +122,7 @@ or user secrets.
     "consecutive_no_progress": 0
   },
   "dependencies": ["opaque-task-id"],
+  "wait": {"deadline_at": "2026-08-29T12:00:00Z", "expected": "terminal"},
   "attempts": [],
   "last_progress": {
     "at": "2026-08-29T11:45:00Z",
@@ -129,6 +130,7 @@ or user secrets.
     "evidence_hash": "sha256"
   },
   "blocker": null,
+  "escalation": null,
   "resolution": null
 }
 ```
@@ -152,7 +154,7 @@ stateDiagram-v2
     verifying --> active: specific new finding within review budget
     active --> paused: ambiguity, no progress, cycle, or budget pressure
     waiting --> paused: dependency deadline or dependency cycle
-    paused --> active: coordinator grants new hypothesis or changed input
+    paused --> ready: Lead resume with new hypothesis or changed input
     paused --> blocked: external prerequisite unavailable
     paused --> failed: recovery exhausted or contract impossible
     completed --> [*]
@@ -299,25 +301,37 @@ Lead adjudication; neither agent continues to argue or patch indefinitely.
 ## Escalation contract
 
 `paused` is a successful safety outcome, not a silent failure. The coordinator
-emits a concise escalation record:
+emits a concise escalation record and stores it on the run as `escalation`:
 
 ```json
 {
   "state": "paused",
-  "reason_code": "no_progress | budget_exhausted | dependency_cycle | ambiguous_contract | retry_exhausted",
+  "reason_code": "no_progress | budget_exhausted | dependency_cycle | dependency_deadline | deadline_exceeded | retry_exhausted | review_deadlock | ambiguous_contract",
   "last_successful_checkpoint": "safe evidence reference",
-  "attempt_summary": "counts and normalized action identities",
+  "attempt_summary": {
+    "actions": 4,
+    "consecutive_no_progress": 2,
+    "attempt_count": 4,
+    "last_action": "tool",
+    "last_target": "provider",
+    "last_key": "sha256"
+  },
   "what_changed": "none since attempt 4",
   "decision_needed": "one concrete question or option set",
-  "resume_requirements": ["changed input or explicit decision"]
+  "resume_requirements": ["changed input or explicit Lead decision"]
 }
 ```
 
-Escalate to the user only for an external preference, approval, credential,
-policy, or unavailable resource that the lead cannot resolve. Internal conflicts
-and dependency cycles go to Lead first. A human reply resumes a new attempt only
-when its normalized input changes or it explicitly authorizes a bounded
-exception.
+Resume is a Lead-only API. `resume(task_id, hypothesis, budget?)` is the only
+transition out of `paused` back to `ready`. A human or Lead reply may start a
+new attempt only after this recorded decision. Escalate to the user only for an
+external preference, approval, credential, policy, or unavailable resource that
+the lead cannot resolve. Internal conflicts and dependency cycles go to Lead
+first.
+
+Waiting is not resume. `wake(task_id)` returns a waiting run to `ready` only
+when every named dependency is terminal and the wait deadline has not elapsed.
+Missing deadline, elapsed deadline, or a dependency cycle pauses the run.
 
 ## Recommended defaults
 
@@ -353,26 +367,32 @@ it cannot be an automatic rollover.
 
 ## Acceptance criteria
 
-- [ ] An identical terminal request returns the existing terminal record and
+- [x] An identical terminal request returns the existing terminal record and
   does not invoke a tool, provider, or worker again.
-- [ ] A non-retryable failure cannot trigger a second materially identical
+- [x] A non-retryable failure cannot trigger a second materially identical
   action.
-- [ ] A transient failure retries no more than three times, honors backoff and
-  deadline, and records each attempt.
-- [ ] Two consecutive completed attempts with no valid progress event pause the
+- [x] A transient failure retries no more than three times, honors backoff and
+  deadline, and records each attempt. The first retry is immediate; later
+  retries wait `min(30 s, 2^n s)`.
+- [x] Two consecutive completed attempts with no valid progress event pause the
   run with a `no_progress` escalation record.
 - [ ] A remote operation with a recorded idempotency key is inspected before
-  any recovery resubmission.
-- [ ] A two-node and a self dependency cycle are detected before further worker
+  any recovery resubmission. Guard records `attempt_started`; provider adapters
+  still need to inspect remote job state before resubmit.
+- [x] A two-node and a self dependency cycle are detected before further worker
   polling; each affected task is paused and the cycle path is recorded.
-- [ ] A worker cannot enter `waiting` without a named dependency and deadline.
-- [ ] A repeated review finding requires new evidence; the second disagreement
+- [x] A worker cannot enter `waiting` without a named dependency and deadline.
+- [x] A repeated review finding requires new evidence; the second disagreement
   is escalated to Lead rather than causing further autonomous review/patch
   rounds.
+- [x] `paused` runs resume only through Lead `resume()` with a new hypothesis.
+- [x] Completed runs are idempotent; a second `complete()` returns the terminal
+  record.
 - [ ] State recovery after process interruption preserves counters, does not
   duplicate external side effects, and either resumes from a verified checkpoint
-  or returns a stable recovery error.
-- [ ] Ledger and escalation evidence exclude secrets, raw provider responses,
+  or returns a stable recovery error. Durable JSON state is in place; adapter
+  inspect-before-resubmit remains open.
+- [x] Ledger and escalation evidence exclude secrets, raw provider responses,
   local source paths, commands, and unbounded model transcripts.
 
 ## Risks and operating notes

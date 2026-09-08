@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ENSURE_RUNTIME = ROOT / "scripts" / "ensure-runtime.ps1"
 START_STUDIO = ROOT / "scripts" / "start-studio.ps1"
+STOP_STUDIO = ROOT / "scripts" / "stop-studio.ps1"
 
 
 def _extract_ps_function(source: str, name: str) -> str:
@@ -48,7 +49,7 @@ def _powershell(*args: str, cwd: Path | None = None) -> subprocess.CompletedProc
 
 class RuntimeBootstrapTests(unittest.TestCase):
     def test_bootstrap_scripts_parse(self):
-        for script in (ENSURE_RUNTIME, START_STUDIO):
+        for script in (ENSURE_RUNTIME, START_STUDIO, STOP_STUDIO):
             command = (
                 "$errors = $null; "
                 "[void][System.Management.Automation.Language.Parser]::ParseFile("
@@ -57,6 +58,60 @@ class RuntimeBootstrapTests(unittest.TestCase):
             )
             result = _powershell("-Command", command)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_stop_studio_treats_child_listener_as_owned(self):
+        helpers = "\n".join(
+            (
+                _extract_ps_function(STOP_STUDIO.read_text(encoding="utf-8"), "Get-ForeignListenerIds"),
+                _extract_ps_function(STOP_STUDIO.read_text(encoding="utf-8"), "Test-IsAigcStudioCommandLine"),
+            )
+        )
+        command = (
+            f"{helpers}; "
+            "$foreign = @(Get-ForeignListenerIds -PortOwners @(3688) -TreeIds @(27860, 3688)); "
+            "if ($foreign.Count -ne 0) { throw ('unexpected foreign owners: ' + ($foreign -join ',')) }; "
+            "$unrelated = @(Get-ForeignListenerIds -PortOwners @(9999) -TreeIds @(27860, 3688)); "
+            "if ($unrelated.Count -ne 1 -or $unrelated[0] -ne 9999) { throw ('unrelated listener must remain foreign') }; "
+            "$ok = Test-IsAigcStudioCommandLine -Name 'python.exe' -CommandLine 'D:\\py\\python.exe -m uvicorn api_server:app --host 127.0.0.1 --port 8000' -Port 8000; "
+            "if (-not $ok) { throw 'studio command line was not recognized' }; "
+            "Write-Output 'TREE_OWNERSHIP_OK'"
+        )
+        result = _powershell("-Command", command)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("TREE_OWNERSHIP_OK", result.stdout)
+
+    def test_find_studio_port_skips_reserved_and_stays_ephemeral(self):
+        source = START_STUDIO.read_text(encoding="utf-8")
+        helpers = "\n".join(
+            (
+                _extract_ps_function(source, "Test-ReservedStudioPort"),
+                _extract_ps_function(source, "Test-StudioPortCandidate"),
+                _extract_ps_function(source, "Find-StudioPort"),
+            )
+        )
+        command = (
+            "$ErrorActionPreference = 'Stop'\n"
+            "Set-StrictMode -Version Latest\n"
+            "$script:StudioPortMin = 49152\n"
+            "$script:StudioPortMax = 49170\n"
+            "$script:ReservedStudioPorts = @(8000, 8080, 5173, 3000, 49152)\n"
+            "function Test-PortInUse { param([int]$Port) return $Port -eq 49153 }\n"
+            f"{helpers}\n"
+            "if (Test-ReservedStudioPort -Port 8000) { } else { throw '8000 must stay reserved' }\n"
+            "if (Test-StudioPortCandidate -Port 8000) { throw 'well-known ports must be rejected' }\n"
+            "if (Test-StudioPortCandidate -Port 49152) { throw 'reserved ephemeral ports must be rejected' }\n"
+            "if (Test-StudioPortCandidate -Port 49153) { throw 'busy ports must be rejected' }\n"
+            "$seen = @{}\n"
+            "1..8 | ForEach-Object { $seen[(Find-StudioPort)] = $true }\n"
+            "if ($seen.ContainsKey(8000) -or $seen.ContainsKey(49152) -or $seen.ContainsKey(49153)) { throw 'selected a reserved or busy port' }\n"
+            "foreach ($port in $seen.Keys) {\n"
+            "  if ($port -lt 49152 -or $port -gt 49170) { throw ('port out of range: ' + $port) }\n"
+            "}\n"
+            "Write-Output ('PORT_OK ' + (($seen.Keys | Sort-Object) -join ','))\n"
+        )
+        result = _powershell("-Command", command)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PORT_OK", result.stdout)
 
     def test_probe_reports_usable_python_and_node(self):
         result = _powershell("-File", str(ENSURE_RUNTIME), "-Probe")

@@ -12,10 +12,9 @@ import hashlib
 import json
 import os
 import re
-import sys
 import tempfile
-from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
+from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +23,7 @@ DEFAULT_STATE_DIR = ".agents/runtime/herdr-anti-loop"
 TERMINAL_STATES = frozenset({"completed", "blocked", "failed"})
 ACTIVE_STATES = frozenset({"ready", "active", "waiting", "paused", "verifying"})
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+MAX_TRANSIENT_RETRIES = 3
 
 
 class GuardError(RuntimeError):
@@ -38,8 +38,12 @@ class GuardError(RuntimeError):
         return {"code": self.code, "message": self.message}
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _utcnow().isoformat()
 
 
 def _canonical(value: Any) -> str:
@@ -62,8 +66,27 @@ def _safe_text(value: str, field: str, limit: int = 512) -> str:
     return value.strip()
 
 
+def _parse_time(value: Any, field: str = "deadline_at") -> datetime | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise GuardError("invalid_budget", f"{field} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise GuardError("invalid_budget", f"{field} must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _retry_delay_seconds(retry_count: int) -> int:
+    return min(30, 2 ** max(1, retry_count))
+
+
 def _budget(value: Mapping[str, Any] | None) -> dict[str, int]:
     raw = dict(value or {})
+    raw.pop("deadline_at", None)
     defaults = {
         "max_actions": 24,
         "max_tool_calls": 16,
@@ -78,6 +101,9 @@ def _budget(value: Mapping[str, Any] | None) -> dict[str, int]:
         if not isinstance(candidate, int) or isinstance(candidate, bool) or candidate < 0:
             raise GuardError("invalid_budget", f"{key} must be a non-negative integer")
         result[key] = candidate
+    unexpected = set(raw) - set(defaults)
+    if unexpected:
+        raise GuardError("invalid_budget", f"unknown budget field: {sorted(unexpected)[0]}")
     return result
 
 
@@ -110,6 +136,8 @@ class AgentRunStore:
                 raise GuardError("corrupt_state", "anti-loop state has invalid counters")
         if not isinstance(run.get("attempts"), list) or not isinstance(run.get("dependencies"), list):
             raise GuardError("corrupt_state", "anti-loop state has invalid attempts or dependencies")
+        if run.get("deadline_at") is not None:
+            _parse_time(run.get("deadline_at"))
         return run
 
     def load(self, task_id: str) -> dict[str, Any] | None:
@@ -161,8 +189,21 @@ class AgentRunStore:
 class AntiLoopGuard:
     """Admission gates and cycle detection for one workspace's agent runs."""
 
-    def __init__(self, state_dir: str | Path = DEFAULT_STATE_DIR):
+    def __init__(self, state_dir: str | Path = DEFAULT_STATE_DIR, clock: Callable[[], datetime] | None = None):
         self.store = AgentRunStore(state_dir)
+        self._clock = clock or _utcnow
+
+    def _stamp(self) -> str:
+        value = self._clock()
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+
+    def _now_dt(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     def start(
         self,
@@ -186,6 +227,8 @@ class AntiLoopGuard:
             if existing["input_fingerprint"] != fingerprint:
                 raise GuardError("task_conflict", "task_id already exists with a different immutable input")
             return existing
+        raw_budget = dict(budget or {})
+        deadline = _parse_time(raw_budget.get("deadline_at"))
         run = {
             "version": RUN_VERSION,
             "task_id": task_id,
@@ -195,12 +238,15 @@ class AntiLoopGuard:
             "acceptance": acceptance,
             "input_fingerprint": fingerprint,
             "state": "ready",
-            "budget": _budget(budget),
+            "budget": _budget(raw_budget),
+            "deadline_at": deadline.isoformat() if deadline else None,
             "counters": {"actions": 0, "tool_calls": 0, "model_turns": 0, "delegations": 0, "review_rounds": 0, "consecutive_no_progress": 0},
             "dependencies": [],
+            "wait": None,
             "attempts": [],
             "last_progress": None,
             "blocker": None,
+            "escalation": None,
             "resolution": None,
             "herdr_events": [],
         }
@@ -211,17 +257,53 @@ class AntiLoopGuard:
     def _attempt_key(action_type: str, target: str, normalized_input: Mapping[str, Any]) -> str:
         return _digest({"action_type": action_type, "target": target, "input": dict(normalized_input)})
 
-    @staticmethod
-    def _pause(run: dict[str, Any], reason_code: str, decision_needed: str) -> None:
+    def _escalation(self, run: dict[str, Any], reason_code: str, decision_needed: str) -> dict[str, Any]:
+        attempts = run.get("attempts") or []
+        finished = [attempt for attempt in attempts if attempt.get("status") == "finished"]
+        last = finished[-1] if finished else None
+        if last is None:
+            what_changed = "none"
+        elif last.get("progress"):
+            what_changed = str(last.get("expected_progress") or "progress")
+        else:
+            what_changed = f"none since attempt {last['sequence']}"
+        return {
+            "state": "paused",
+            "reason_code": reason_code,
+            "last_successful_checkpoint": (run.get("last_progress") or {}).get("evidence_hash"),
+            "attempt_summary": {
+                "actions": run["counters"]["actions"],
+                "consecutive_no_progress": run["counters"]["consecutive_no_progress"],
+                "attempt_count": len(attempts),
+                "last_action": None if last is None else last.get("action_type"),
+                "last_target": None if last is None else last.get("target"),
+                "last_key": None if last is None else last.get("key"),
+            },
+            "what_changed": what_changed,
+            "decision_needed": decision_needed,
+            "resume_requirements": ["changed input or explicit Lead decision"],
+        }
+
+    def _pause(self, run: dict[str, Any], reason_code: str, decision_needed: str) -> None:
         run["state"] = "paused"
+        run["wait"] = None
         run["blocker"] = {
             "reason_code": reason_code,
             "decision_needed": decision_needed,
-            "at": _now(),
+            "at": self._stamp(),
             "last_successful_checkpoint": (run.get("last_progress") or {}).get("evidence_hash"),
         }
+        run["escalation"] = self._escalation(run, reason_code, decision_needed)
+
+    def _enforce_deadline(self, run: dict[str, Any]) -> None:
+        deadline = _parse_time(run.get("deadline_at"))
+        if deadline is not None and self._now_dt() >= deadline:
+            self._pause(run, "deadline_exceeded", "Lead must extend the deadline with a new hypothesis")
+            self.store.save(run)
+            raise GuardError("deadline_exceeded", "run deadline has elapsed; run is paused")
 
     def _enforce_budget(self, run: dict[str, Any], action_type: str) -> None:
+        self._enforce_deadline(run)
         counters = run["counters"]
         budget = run["budget"]
         if counters["actions"] >= budget["max_actions"]:
@@ -234,6 +316,17 @@ class AntiLoopGuard:
             self.store.save(run)
             raise GuardError("budget_exhausted", f"{counter_key} budget is exhausted; run is paused")
 
+    def _reject_waiting(self, run: dict[str, Any]) -> None:
+        if run["state"] != "waiting":
+            return
+        wait = run.get("wait") if isinstance(run.get("wait"), Mapping) else {}
+        deadline = _parse_time((wait or {}).get("deadline_at"))
+        if deadline is None or self._now_dt() >= deadline:
+            self._pause(run, "dependency_deadline", "Lead must break the wait, replace the dependency, or extend its deadline")
+            self.store.save(run)
+            raise GuardError("dependency_deadline", "waiting deadline elapsed; run is paused")
+        raise GuardError("waiting", "task is waiting on a named dependency and cannot admit new work")
+
     def admit(
         self,
         task_id: str,
@@ -244,13 +337,30 @@ class AntiLoopGuard:
         hypothesis: str | None = None,
     ) -> dict[str, Any]:
         run = self._require_active(task_id)
+        self._reject_waiting(run)
         action_type = _safe_id(action_type, "action_type")
         target = _safe_text(target, "target")
         expected_progress = _safe_text(expected_progress, "expected_progress")
         if hypothesis is not None:
             hypothesis = _safe_text(hypothesis, "hypothesis")
+        payload = dict(normalized_input or {})
+        finding_id = payload.get("finding_id")
+        if finding_id is not None:
+            finding_id = _safe_id(str(finding_id), "finding_id")
+        if action_type == "review" and finding_id:
+            prior_reviews = [
+                attempt
+                for attempt in run["attempts"]
+                if attempt.get("action_type") == "review"
+                and attempt.get("finding_id") == finding_id
+                and attempt.get("status") == "finished"
+            ]
+            if len(prior_reviews) >= 2:
+                self._pause(run, "review_deadlock", "Lead must adjudicate the repeated review finding")
+                self.store.save(run)
+                raise GuardError("review_deadlock", "review finding exceeded its reopen budget; run is paused")
         self._enforce_budget(run, action_type)
-        key = self._attempt_key(action_type, target, normalized_input or {})
+        key = self._attempt_key(action_type, target, payload)
         matching = [attempt for attempt in run["attempts"] if attempt["key"] == key]
         if matching:
             latest = matching[-1]
@@ -258,26 +368,33 @@ class AntiLoopGuard:
                 raise GuardError("duplicate_inflight", "an identical action is already admitted")
             if latest["outcome"] not in {"transient", "unknown"}:
                 raise GuardError("duplicate_action", "identical action already has a non-retryable outcome")
-            retry_count = sum(attempt["outcome"] in {"transient", "unknown"} for attempt in matching)
-            if retry_count >= 3:
+            retry_count = sum(attempt.get("outcome") in {"transient", "unknown"} for attempt in matching)
+            if retry_count >= MAX_TRANSIENT_RETRIES:
                 self._pause(run, "retry_exhausted", "Provide changed input, a new hypothesis, or an external decision")
                 self.store.save(run)
                 raise GuardError("retry_exhausted", "identical action exhausted its retry budget; run is paused")
             if not hypothesis:
                 raise GuardError("missing_hypothesis", "retry requires a concrete hypothesis")
+            if retry_count >= 2:
+                finished_at = _parse_time(latest.get("finished_at"), "finished_at")
+                if finished_at is not None:
+                    due = finished_at + timedelta(seconds=_retry_delay_seconds(retry_count))
+                    if self._now_dt() < due:
+                        raise GuardError("backoff_pending", f"retry is not due until {due.isoformat()}")
         attempt = {
             "sequence": len(run["attempts"]) + 1,
             "key": key,
             "action_type": action_type,
             "target": target,
-            "input_hash": _digest(dict(normalized_input or {})),
+            "finding_id": finding_id,
+            "input_hash": _digest(payload),
             "expected_progress": expected_progress,
             "hypothesis": hypothesis,
             "status": "started",
             "outcome": None,
             "progress": None,
             "evidence_hash": None,
-            "started_at": _now(),
+            "started_at": self._stamp(),
             "finished_at": None,
         }
         run["attempts"].append(attempt)
@@ -310,15 +427,25 @@ class AntiLoopGuard:
         if attempt["status"] != "started":
             raise GuardError("attempt_finished", "attempt is already finished")
         evidence_hash = _digest(dict(evidence or {})) if evidence else None
-        attempt.update({"status": "finished", "outcome": outcome, "progress": progress, "evidence_hash": evidence_hash, "finished_at": _now()})
+        attempt.update(
+            {
+                "status": "finished",
+                "outcome": outcome,
+                "progress": progress,
+                "evidence_hash": evidence_hash,
+                "finished_at": self._stamp(),
+            }
+        )
         if progress:
             run["counters"]["consecutive_no_progress"] = 0
-            run["last_progress"] = {"at": _now(), "kind": attempt["expected_progress"], "evidence_hash": evidence_hash}
+            run["last_progress"] = {"at": self._stamp(), "kind": attempt["expected_progress"], "evidence_hash": evidence_hash}
         else:
             run["counters"]["consecutive_no_progress"] += 1
         if outcome == "permission_or_policy":
             run["state"] = "blocked"
-            run["blocker"] = {"reason_code": outcome, "decision_needed": "Required approval or permission is unavailable", "at": _now()}
+            run["blocker"] = {"reason_code": outcome, "decision_needed": "Required approval or permission is unavailable", "at": self._stamp()}
+            run["escalation"] = self._escalation(run, outcome, "Required approval or permission is unavailable")
+            run["escalation"]["state"] = "blocked"
         elif outcome in {"input_or_contract", "environment"}:
             self._pause(run, outcome, "Change the input/contract or resolve the named environment prerequisite")
         elif run["counters"]["consecutive_no_progress"] >= run["budget"]["max_no_progress"]:
@@ -328,7 +455,7 @@ class AntiLoopGuard:
         self.store.save(run)
         return run
 
-    def dependencies(self, task_id: str, dependency_ids: Iterable[str]) -> dict[str, Any]:
+    def dependencies(self, task_id: str, dependency_ids: Iterable[str], deadline_at: str | None = None) -> dict[str, Any]:
         run = self._require_active(task_id)
         dependencies = sorted({_safe_id(value, "dependency_id") for value in dependency_ids})
         if run["task_id"] in dependencies:
@@ -339,11 +466,72 @@ class AntiLoopGuard:
             dependency = self.store.load(dependency_id)
             if dependency is None or dependency["workspace_id"] != run["workspace_id"]:
                 raise GuardError("missing_dependency", "dependency does not exist in the same workspace")
+        if dependencies:
+            deadline = _parse_time(deadline_at)
+            if deadline is None:
+                raise GuardError("missing_deadline", "waiting requires a named dependency deadline")
+            run["wait"] = {"deadline_at": deadline.isoformat(), "expected": "terminal"}
+            run["state"] = "waiting"
+        else:
+            run["wait"] = None
+            run["state"] = "ready"
         run["dependencies"] = dependencies
-        run["state"] = "waiting" if dependencies else "ready"
         self.store.save(run)
         self.detect_cycles(run["workspace_id"])
-        return self.store.load(run["task_id"]) or run
+        loaded = self.store.load(run["task_id"]) or run
+        if loaded["state"] == "waiting" and deadline_at:
+            deadline = _parse_time(deadline_at)
+            if deadline is not None and self._now_dt() >= deadline:
+                self._pause(loaded, "dependency_deadline", "Lead must break the wait, replace the dependency, or extend its deadline")
+                self.store.save(loaded)
+                raise GuardError("dependency_deadline", "waiting deadline elapsed; run is paused")
+        return loaded
+
+    def wake(self, task_id: str) -> dict[str, Any]:
+        run = self._require_active(task_id)
+        if run["state"] != "waiting":
+            return run
+        unresolved: list[str] = []
+        for dependency_id in run["dependencies"]:
+            dependency = self.store.load(dependency_id)
+            if dependency is None or dependency["state"] not in TERMINAL_STATES:
+                unresolved.append(dependency_id)
+        if not unresolved:
+            run["state"] = "ready"
+            run["wait"] = None
+            self.store.save(run)
+            return run
+        wait = run.get("wait") if isinstance(run.get("wait"), Mapping) else {}
+        deadline = _parse_time((wait or {}).get("deadline_at"))
+        if deadline is None or self._now_dt() >= deadline:
+            self._pause(run, "dependency_deadline", "Lead must break the wait, replace the dependency, or extend its deadline")
+            self.store.save(run)
+            raise GuardError("dependency_deadline", "waiting deadline elapsed; run is paused")
+        raise GuardError("waiting", "named dependencies are not terminal")
+
+    def resume(self, task_id: str, hypothesis: str, budget: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        run = self.store.load(_safe_id(task_id, "task_id"))
+        if run is None:
+            raise GuardError("unknown_task", "task does not exist")
+        if run["state"] in TERMINAL_STATES:
+            raise GuardError("terminal_task", "task is already terminal")
+        if run["state"] != "paused":
+            raise GuardError("not_paused", "only a paused task can be resumed by Lead")
+        hypothesis = _safe_text(hypothesis, "hypothesis")
+        raw_budget = dict(budget or {})
+        if "deadline_at" in raw_budget:
+            deadline = _parse_time(raw_budget.get("deadline_at"))
+            run["deadline_at"] = deadline.isoformat() if deadline else None
+        if raw_budget:
+            merged = dict(run["budget"])
+            merged.update({key: value for key, value in raw_budget.items() if key != "deadline_at"})
+            run["budget"] = _budget(merged)
+        run["state"] = "ready"
+        run["blocker"] = None
+        run["wait"] = None
+        run["resume"] = {"at": self._stamp(), "hypothesis": hypothesis}
+        self.store.save(run)
+        return run
 
     def observe_herdr_event(self, workspace_id: str, event: Mapping[str, Any]) -> list[dict[str, Any]]:
         workspace_id = _safe_id(workspace_id, "workspace_id")
@@ -355,7 +543,7 @@ class AntiLoopGuard:
         changed = []
         for run in self.store.runs(workspace_id):
             history = run.setdefault("herdr_events", [])
-            history.append({"at": _now(), **safe_event})
+            history.append({"at": self._stamp(), **safe_event})
             del history[:-20]
             self.store.save(run)
             changed.append(run)
@@ -407,9 +595,20 @@ class AntiLoopGuard:
         return components
 
     def complete(self, task_id: str, evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        run = self._require_active(task_id)
+        run = self.store.load(_safe_id(task_id, "task_id"))
+        if run is None:
+            raise GuardError("unknown_task", "task does not exist")
+        if run["state"] == "completed":
+            return run
+        if run["state"] in TERMINAL_STATES:
+            raise GuardError("terminal_task", "task is already terminal")
+        if run["state"] == "paused":
+            raise GuardError("paused", "task is paused and requires a Lead decision")
+        if run["state"] == "waiting":
+            raise GuardError("waiting", "task is waiting on a named dependency and cannot complete")
         run["state"] = "completed"
-        run["resolution"] = {"at": _now(), "evidence_hash": _digest(dict(evidence or {})) if evidence else None}
+        run["wait"] = None
+        run["resolution"] = {"at": self._stamp(), "evidence_hash": _digest(dict(evidence or {})) if evidence else None}
         self.store.save(run)
         return run
 
@@ -469,6 +668,13 @@ def _parser() -> argparse.ArgumentParser:
     dependencies = sub.add_parser("dependencies")
     dependencies.add_argument("--task-id", required=True)
     dependencies.add_argument("--depends-on", action="append", default=[])
+    dependencies.add_argument("--deadline")
+    wake = sub.add_parser("wake")
+    wake.add_argument("--task-id", required=True)
+    resume = sub.add_parser("resume")
+    resume.add_argument("--task-id", required=True)
+    resume.add_argument("--hypothesis", required=True)
+    resume.add_argument("--budget", default="{}")
     complete = sub.add_parser("complete")
     complete.add_argument("--task-id", required=True)
     complete.add_argument("--evidence", default="{}")
@@ -493,7 +699,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "finish":
             result = guard.finish(args.task_id, args.sequence, args.outcome, args.progress == "yes", _json_arg(args.evidence))
         elif args.command == "dependencies":
-            result = guard.dependencies(args.task_id, args.depends_on)
+            result = guard.dependencies(args.task_id, args.depends_on, args.deadline)
+        elif args.command == "wake":
+            result = guard.wake(args.task_id)
+        elif args.command == "resume":
+            result = guard.resume(args.task_id, args.hypothesis, _json_arg(args.budget))
         elif args.command == "complete":
             result = guard.complete(args.task_id, _json_arg(args.evidence))
         elif args.command == "status":

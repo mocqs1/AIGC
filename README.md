@@ -82,9 +82,10 @@ On Windows, double-click `start-aigc.bat` or run:
 ```
 
 The launcher checks Python and Node.js, installs missing runtimes and
-dependencies, builds the UI, starts the local API, and opens the studio. The
-default URL is `http://127.0.0.1:8000`; if that port is occupied, it selects
-an available port from 8001 through 8099.
+dependencies, builds the UI, starts the local API, and opens the studio. Each
+launch picks a random free high port in 49152-65535, skipping common service
+ports such as 8000, 8080, 3000, and 5173. The chosen URL is printed and opened
+automatically.
 
 Stop the managed server with:
 
@@ -94,12 +95,12 @@ Stop the managed server with:
 
 For a manual backend start:
 
-```powershell
-python -m uvicorn api_server:app --host 127.0.0.1 --port 8000
+python -m uvicorn api_server:app --host 127.0.0.1 --port 49152
 ```
 
-Open `http://127.0.0.1:8000`. For frontend development, keep the backend
-running and execute `cd web; npm run dev` in another terminal.
+Open the printed URL. For frontend development, keep the backend running and
+execute `cd web; npm run dev` in another terminal; the Vite proxy uses
+`AIGC_API_PORT` when set.
 
 ## Included workflows
 

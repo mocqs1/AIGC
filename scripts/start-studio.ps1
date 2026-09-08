@@ -12,10 +12,16 @@ $webRoot = Join-Path $projectRoot "web"
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
 $runtimeRoot = Join-Path $projectRoot ".runtime"
 $portPath = Join-Path $runtimeRoot "studio.port"
-$studioPort = 8000
+$studioPort = 0
 $studioUrl = ""
 $healthUrl = ""
 $openApiUrl = ""
+$script:StudioPortMin = 49152
+$script:StudioPortMax = 65535
+$script:ReservedStudioPorts = @(
+    8000, 8080, 8081, 8443, 8888, 9000, 9090, 9200, 9300, 9418,
+    27017, 3306, 5432, 6379, 11211, 1433, 1521, 5000, 5001, 5173, 3000, 3001
+)
 
 function Set-StudioEndpoint {
     param([Parameter(Mandatory)][int]$Port)
@@ -24,8 +30,6 @@ function Set-StudioEndpoint {
     $script:healthUrl = "$script:studioUrl/api/health"
     $script:openApiUrl = "$script:studioUrl/openapi.json"
 }
-
-Set-StudioEndpoint -Port $studioPort
 
 function Test-PortInUse {
     param([Parameter(Mandatory)][int]$Port)
@@ -45,16 +49,45 @@ function Test-PortInUse {
     }
 }
 
+function Test-ReservedStudioPort {
+    param([Parameter(Mandatory)][int]$Port)
+    return $Port -in $script:ReservedStudioPorts
+}
+
+function Test-StudioPortCandidate {
+    param([Parameter(Mandatory)][int]$Port)
+    if ($Port -lt $script:StudioPortMin -or $Port -gt $script:StudioPortMax) {
+        return $false
+    }
+    if (Test-ReservedStudioPort -Port $Port) {
+        return $false
+    }
+    return -not (Test-PortInUse -Port $Port)
+}
+
 function Find-StudioPort {
-    foreach ($candidate in 8000..8099) {
-        if (-not (Test-PortInUse -Port $candidate)) {
+    $rng = [System.Random]::new()
+    $span = $script:StudioPortMax - $script:StudioPortMin + 1
+    for ($attempt = 0; $attempt -lt 64; $attempt++) {
+        $candidate = $rng.Next($script:StudioPortMin, $script:StudioPortMax + 1)
+        if (Test-StudioPortCandidate -Port $candidate) {
             return $candidate
         }
     }
-    throw "No available local port was found between 8000 and 8099."
+    $offset = $rng.Next(0, $span)
+    for ($index = 0; $index -lt $span; $index++) {
+        $candidate = $script:StudioPortMin + (($offset + $index) % $span)
+        if (Test-StudioPortCandidate -Port $candidate) {
+            return $candidate
+        }
+    }
+    throw "No available local port was found between $($script:StudioPortMin) and $($script:StudioPortMax)."
 }
 
 function Test-AigcStudio {
+    if ($script:studioPort -le 0 -or [string]::IsNullOrWhiteSpace($script:healthUrl)) {
+        return $false
+    }
     try {
         $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2
         $metadata = Invoke-RestMethod -Uri $openApiUrl -TimeoutSec 2
