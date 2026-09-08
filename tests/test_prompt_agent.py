@@ -23,6 +23,41 @@ class GeneratePromptTests(unittest.TestCase):
         self.assertIn("lighting", prompt)
         self.assertIn("materials", prompt)
 
+
+    def test_image_prompt_rewrites_bedroom_to_studio_and_locks_intimate_apparel(self) -> None:
+        prompt = generate_prompt(
+            {
+                "product": "black high-waist shapewear",
+                "scene": "premium bedroom",
+                "style": "SKIMS luxury fashion advertisement",
+                "type": "image",
+            }
+        )
+
+        self.assertIn("black high-waist shapewear", prompt)
+        self.assertIn("clean neutral studio", prompt)
+        self.assertNotIn("premium bedroom", prompt)
+        self.assertNotIn("SKIMS", prompt)
+        self.assertIn("INTIMATE-APPAREL SAFETY LOCK", prompt)
+        self.assertIn("product-only", prompt)
+        self.assertIn("headless mannequin", prompt)
+
+    def test_image_prompt_rewrites_chinese_bedroom_defaults(self) -> None:
+        prompt = generate_prompt(
+            {
+                "product": "黑色高腰塑身衣",
+                "scene": "高级卧室",
+                "style": "SKIMS 高级广告感",
+                "type": "image",
+            }
+        )
+
+        self.assertIn("黑色高腰塑身衣", prompt)
+        self.assertIn("clean neutral studio", prompt)
+        self.assertNotIn("高级卧室", prompt)
+        self.assertNotIn("SKIMS", prompt)
+        self.assertIn("INTIMATE-APPAREL SAFETY LOCK", prompt)
+
     def test_video_request_includes_motion_and_camera_direction(self) -> None:
         prompt = generate_prompt(
             {
@@ -98,7 +133,7 @@ class GeneratePromptTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("featuring a glass bottle in a studio", prompt)
+        self.assertIn("photograph of a glass bottle. Setting: a studio.", prompt)
         self.assertNotIn("  a glass bottle  ", prompt)
 
 

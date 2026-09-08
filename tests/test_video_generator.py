@@ -38,6 +38,23 @@ class VideoGeneratorTests(unittest.TestCase):
             self.assertEqual(client.queried, ["video-task-123", "video-task-123"])
             self.assertEqual(client.results, ["video-task-123"])
 
+
+    def test_resume_task_skips_submit_and_notifies_new_submission_only(self) -> None:
+        client = FakeVideoClient(["completed"])
+        submitted = []
+        with tempfile.TemporaryDirectory() as output_dir:
+            path = generate_video(
+                "a product video prompt",
+                client=client,
+                output_dir=output_dir,
+                resume_task_id="persisted-video",
+                on_task_submitted=submitted.append,
+            )
+            self.assertTrue(Path(path).is_file())
+        self.assertEqual(client.submitted, [])
+        self.assertEqual(client.queried, ["persisted-video"])
+        self.assertEqual(submitted, [])
+
     def test_image_to_video_passes_reference_image(self) -> None:
         client = FakeVideoClient(["success"])
         with tempfile.TemporaryDirectory() as output_dir:

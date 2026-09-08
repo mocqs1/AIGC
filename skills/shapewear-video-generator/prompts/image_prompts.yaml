@@ -4,27 +4,45 @@ prompts:
   - id: luxury_fashion
     label: Luxury Fashion
     prompt: >-
-      premium shapewear catalog advertisement, adult fully covered fashion model
-      wearing {product} in {color}, controlled luxury studio lighting, refined
-      editorial composition, natural fashion pose, single product hero, realistic
-      skin and textile rendering, garment shown at a useful full-product scale
+      premium shapewear catalog still, product-only or a fully covered headless mannequin
+      wearing {product} in {color}, {scene}, {style}, controlled luxury studio lighting,
+      refined commercial composition, product-only presentation, single product hero,
+      realistic textile rendering, garment shown at a useful full-product scale, no
+      bedroom lifestyle, no faces, no skin-focused crop
     use_when: controlled studio, premium editorial, or luxury brand brief
+
+  - id: fashion_campaign
+    label: Fashion Campaign
+    prompt: >-
+      high-end fashion campaign still of one adult woman fully wearing {product} in
+      {color}, {scene}, {style}. Magazine editorial lighting, controlled luxury
+      studio or clean architectural interior, full-body or three-quarter frame,
+      garment readable from bust through hip and thigh, natural standing fashion
+      pose, refined color, cinematic depth. Not a phone UGC selfie, not a product-only
+      packshot, not a bedroom lifestyle scene. Keep the model adult, fully covered,
+      anatomically correct, and unsexualized. Preserve the same product identity,
+      color, and construction; no extra garments, text, watermark, or competitor
+      branding.
+    use_when: premium apparel campaign, editorial lookbook, or luxury fashion advertisement
 
   - id: tiktok_ugc
     label: TikTok UGC
     prompt: >-
-      authentic product demonstration, adult fully covered woman showing {product}
-      in {color}, natural {scene} environment, realistic phone-camera perspective,
-      soft directional window light, believable fit demonstration, stable readable
-      garment silhouette, no beauty-filter blur, lightly edited vertical social
-      commerce frame
+      authentic TikTok UGC try-on still of one adult woman fully wearing {product} in
+      {color}, {scene}, {style}. Phone-camera vertical 9:16, eye-level or slightly
+      high mirror selfie, natural window light, believable apartment dressing area,
+      complete garment readable from bust through hip and thigh, realistic fabric
+      tension and compression lines, no beauty-filter blur. The model is an adult,
+      fully covered, standing naturally, not lying down, not posed sexually, no
+      bedroom intimacy, no nudity, no extra garments or competitor branding. Keep
+      the same product identity, color, and construction.
     use_when: creator testimonial, mirror selfie, or native social brief
 
   - id: product_detail
     label: Product Detail
     prompt: >-
       high-resolution product detail photograph of {product} in {color}, {material}
-      compression textile, product-only or mannequin presentation, calibrated
-      macro close-up of the fabric and construction, controlled highlights, crisp
-      edge detail, tactile commercial material study, clean neutral background
+      compression textile, {scene}, {style}, product-only or mannequin presentation,
+      calibrated macro close-up of the fabric and construction, controlled highlights,
+      crisp edge detail, tactile commercial material study, clean neutral background
     use_when: fabric, seam, construction, or material-focused brief

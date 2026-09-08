@@ -38,6 +38,9 @@ class MainEntryPointTests(unittest.TestCase):
             saved = Path(path).read_bytes()
         self.assertEqual(saved, b"image")
         self.assertIn("black shapewear", client.submitted[0][0])
+        self.assertIn("clean neutral studio", client.submitted[0][0])
+        self.assertNotIn("premium bedroom", client.submitted[0][0])
+        self.assertIn("INTIMATE-APPAREL SAFETY LOCK", client.submitted[0][0])
 
     def test_video_entry_supports_direct_prompt_and_reference_image(self):
         client = FakeClient(b"video")
@@ -60,6 +63,21 @@ class MainEntryPointTests(unittest.TestCase):
                 output_dir=output_dir,
             )
             self.assertTrue(Path(path).is_file())
+
+    def test_video_entry_forwards_resume_task_id(self):
+        client = FakeClient(b"video")
+        submitted = []
+        with tempfile.TemporaryDirectory() as output_dir:
+            path = generate_video(
+                {"prompt": "animate the product", "type": "video"},
+                client=client,
+                output_dir=output_dir,
+                resume_task_id="persisted-video",
+                on_task_submitted=submitted.append,
+            )
+            self.assertTrue(Path(path).is_file())
+        self.assertEqual(client.submitted, [])
+        self.assertEqual(submitted, [])
 
 
 if __name__ == "__main__":

@@ -38,6 +38,8 @@ def generate_video(
     output_dir: str = "outputs/videos",
     max_polls: int = 30,
     poll_interval: float = 0,
+    resume_task_id: str | None = None,
+    on_task_submitted=None,
 ) -> str:
     """Submit, poll, download, and save one text-to-video or image-to-video result."""
     if not isinstance(prompt, str) or not prompt.strip():
@@ -68,11 +70,19 @@ def generate_video(
         else:
             raise ValueError("video provider must be veo or seedance")
     options = {"image": image} if image is not None else {}
-    submission = generation_client.submit_generation(prompt, **options)
+    # A persisted provider task can be resumed after a browser or API restart.
+    # Never submit it again: a timed-out HTTP response may still have created
+    # a billable task upstream.
+    resume_id = str(resume_task_id).strip() if resume_task_id else ""
+    if resume_id:
+        submission = {"task_id": resume_id}
+    else:
+        submission = generation_client.submit_generation(prompt, **options)
     task_id = _extract_task_id(submission)
     if not task_id:
         raise VideoGenerationError("generation submission did not return a task id")
-
+    if callable(on_task_submitted) and not resume_id:
+        on_task_submitted(task_id)
     completed = False
     for poll_number in range(max_polls):
         status_response = generation_client.query_task(task_id)

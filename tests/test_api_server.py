@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import struct
 import tempfile
@@ -75,6 +76,7 @@ class ApiServerTests(unittest.TestCase):
         self.hermes_key_patch = patch.object(api_server, "HERMES_KEY_PATH", self.output_root / ".hermes.key")
         self.batch_store_patch = patch.object(api_server, "BATCH_STORE_PATH", self.output_root / ".batches.json")
         self.mix_store_patch = patch.object(api_server, "MIX_STORE_PATH", self.output_root / ".mixes.json")
+        self.job_store_patch = patch.object(api_server, "JOB_STORE_PATH", self.output_root / ".jobs.json")
         self.output_patch.start()
         self.outputs_dir_patch.start()
         self.r2_store_patch.start()
@@ -83,6 +85,7 @@ class ApiServerTests(unittest.TestCase):
         self.hermes_key_patch.start()
         self.batch_store_patch.start()
         self.mix_store_patch.start()
+        self.job_store_patch.start()
         self._module_specs_snapshot = {module_id: dict(spec) for module_id, spec in api_server.MODULE_SPECS.items()}
         self._module_option_keys_snapshot = {module_id: set(keys) for module_id, keys in api_server.MODULE_OPTION_KEYS.items()}
         self._environ_snapshot = dict(os.environ)
@@ -111,6 +114,7 @@ class ApiServerTests(unittest.TestCase):
         self.hermes_key_patch.stop()
         self.batch_store_patch.stop()
         self.mix_store_patch.stop()
+        self.job_store_patch.stop()
         self.temp_dir.cleanup()
 
     @staticmethod
@@ -184,6 +188,93 @@ class ApiServerTests(unittest.TestCase):
         self.assertNotIn("GPT-IMAGE-2 SOURCE LOCK", volcano_prompt)
         self.assertIn("PRODUCT SOURCE BINDING", volcano_prompt)
 
+
+    def test_shapewear_preview_switches_prompt_with_style_id(self) -> None:
+        ugc = self.client.post(
+            "/api/prompts/preview",
+            json={
+                "mode": "shapewear_image",
+                "provider": "hermes",
+                "request": {
+                    "product": "black high-waist shapewear",
+                    "style_id": "tiktok_ugc",
+                    "scene": "bright apartment dressing area, full-length mirror",
+                    "style": "TikTok UGC try-on",
+                },
+            },
+        )
+        detail = self.client.post(
+            "/api/prompts/preview",
+            json={
+                "mode": "shapewear_image",
+                "provider": "hermes",
+                "request": {
+                    "product": "black high-waist shapewear",
+                    "style_id": "product_detail",
+                    "scene": "clean neutral studio, product fully visible and centered",
+                    "style": "commercial product still",
+                },
+            },
+        )
+        campaign = self.client.post(
+            "/api/prompts/preview",
+            json={
+                "mode": "shapewear_image",
+                "provider": "hermes",
+                "request": {
+                    "product": "black high-waist shapewear",
+                    "style_id": "fashion_campaign",
+                    "scene": "luxury fashion studio, full-body magazine lighting",
+                    "style": "high-end fashion campaign",
+                },
+            },
+        )
+        self.assertEqual(ugc.status_code, 200)
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(campaign.status_code, 200)
+        ugc_prompt = ugc.json()["prompt"]
+        detail_prompt = detail.json()["prompt"]
+        campaign_prompt = campaign.json()["prompt"]
+        self.assertIn("TikTok UGC try-on still", ugc_prompt)
+        self.assertIn("adult woman fully wearing", ugc_prompt)
+        self.assertNotIn("TikTok UGC try-on still", detail_prompt)
+        self.assertIn("product detail photograph", detail_prompt)
+        self.assertIn("high-end fashion campaign still", campaign_prompt)
+        self.assertNotIn("TikTok UGC try-on still", campaign_prompt)
+        self.assertNotIn("product-only or a fully covered headless mannequin", campaign_prompt)
+
+    def test_generic_image_preview_rewrites_bedroom_and_strips_campaign_brand(self) -> None:
+        response = self.client.post(
+            "/api/prompts/preview",
+            json={
+                "mode": "image",
+                "provider": "hermes",
+                "request": {
+                    "product": "黑色高腰塑身衣",
+                    "scene": "高级卧室",
+                    "style": "SKIMS 高级广告感",
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        prompt = response.json()["prompt"]
+        self.assertIn("GPT-IMAGE-2 CATALOG STILL", prompt)
+        self.assertIn("INTIMATE-APPAREL SAFETY LOCK", prompt)
+        self.assertIn("clean neutral studio", prompt)
+        self.assertNotIn("高级卧室", prompt)
+        self.assertNotIn("SKIMS", prompt)
+
+    def test_sensitive_rejection_explains_prompt_or_reference(self) -> None:
+        error = HermesRequestError(
+            "Hermes request failed (HTTP 400)",
+            status=400,
+            provider_code="InputImageSensitiveContentDetected",
+            provider_message="input image rejected",
+        )
+        _code, message, retryable = api_server._safe_message(error)
+        self.assertFalse(retryable)
+        self.assertIn("Prompt", message)
+        self.assertIn("静物棚拍", message)
     def test_outfit_swap_request_requires_ordered_model_and_outfit_images(self) -> None:
         with self.assertRaisesRegex(ValueError, "model image"):
             api_server.GenerationRequest(mode="model_outfit_swap", provider="hermes", request={}, reference_images=[])
@@ -278,6 +369,7 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(manifest["provider"], "hermes_volcano")
         self.assertEqual(manifest["provider_fallback"]["from"], "hermes")
         self.assertEqual([call.kwargs["provider"] for call in generate_skill.call_args_list], ["hermes", "hermes_volcano"])
+        self.assertEqual([call.kwargs.get("resume_task_id") for call in generate_skill.call_args_list], [None, None])
 
     def test_shapewear_image_does_not_fallback_on_validation_error(self) -> None:
         payload = api_server.GenerationRequest(mode="shapewear_image", provider="hermes", request={})
@@ -1413,7 +1505,128 @@ class ApiServerTests(unittest.TestCase):
         kwargs = generate_skill.call_args.kwargs
         self.assertEqual(kwargs["garment_image"], str(garment.resolve()))
         self.assertNotIn("reference_images", kwargs)
+        self.assertEqual(kwargs["resume_task_id"], None)
+        self.assertTrue(callable(kwargs["on_task_submitted"]))
         self.assertEqual(job.status, "succeeded")
+
+    @patch("api_server.generate_image")
+    def test_image_job_resumes_persisted_provider_task(self, generate_image) -> None:
+        output = self.images / "resumed.png"
+        output.write_bytes(b"result")
+        generate_image.return_value = str(output)
+        payload = api_server.GenerationRequest(mode="image", request={"prompt": "studio product photo"})
+        job = api_server.GenerationJob(
+            id="resume-image",
+            payload=payload,
+            status="running",
+            provider_task_id="remote-123",
+        )
+        api_server.JOBS[job.id] = job
+        with patch.object(api_server, "_image_client_for_provider", return_value=object()):
+            api_server._run_job(job.id)
+        kwargs = generate_image.call_args.kwargs
+        self.assertEqual(kwargs["resume_task_id"], "remote-123")
+        self.assertTrue(callable(kwargs["on_task_submitted"]))
+        self.assertEqual(job.status, "succeeded")
+
+    def test_save_jobs_keeps_request_and_provider_task(self) -> None:
+        payload = api_server.GenerationRequest(
+            mode="video",
+            request={"prompt": "animate the product"},
+            provider="veo",
+            reference_image=api_server.ReferenceImage(kind="url", value="https://cdn.example.com/keyframe.png"),
+        )
+        job = api_server.GenerationJob(
+            id="persist-video",
+            payload=payload,
+            status="running",
+            provider_task_id="video-task-9",
+        )
+        api_server.JOBS[job.id] = job
+        api_server._save_jobs()
+        records = json.loads(api_server.JOB_STORE_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(records[0]["id"], "persist-video")
+        self.assertEqual(records[0]["request"], {"prompt": "animate the product"})
+        self.assertEqual(records[0]["provider_task_id"], "video-task-9")
+        self.assertEqual(records[0]["reference_image"]["value"], "https://cdn.example.com/keyframe.png")
+
+    @patch("api_server.JOB_EXECUTOR.submit")
+    def test_load_jobs_resumes_in_flight_provider_task(self, submit) -> None:
+        api_server.JOB_STORE_PATH.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "restored-job",
+                        "status": "running",
+                        "phase": "waiting",
+                        "mode": "image",
+                        "provider": "hermes",
+                        "provider_task_id": "remote-456",
+                        "request": {"prompt": "studio product photo"},
+                        "reference_images": [],
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        api_server._load_jobs()
+        job = api_server.JOBS["restored-job"]
+        self.assertEqual(job.provider_task_id, "remote-456")
+        self.assertEqual(job.payload.request["prompt"], "studio product photo")
+        submit.assert_called_once_with(api_server._run_job, "restored-job")
+
+    def test_load_jobs_fails_in_flight_without_provider_task(self) -> None:
+        api_server.JOB_STORE_PATH.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "interrupted-job",
+                        "status": "submitted",
+                        "mode": "image",
+                        "provider": "hermes",
+                        "request": {"prompt": "studio product photo"},
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        api_server._load_jobs()
+        job = api_server.JOBS["interrupted-job"]
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.error["code"], "interrupted_job")
+        records = json.loads(api_server.JOB_STORE_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(records[0]["status"], "failed")
+        self.assertEqual(records[0]["error"]["code"], "interrupted_job")
+
+    def test_shapewear_fallback_does_not_reuse_old_task_id(self) -> None:
+        payload = api_server.GenerationRequest(mode="shapewear_image", provider="hermes", request={})
+        job = api_server.GenerationJob(id="shapewear-resume-fallback", payload=payload, provider_task_id="old-task")
+        fallback_manifest = {
+            "prompt": "prompt",
+            "outputs": [str(self.shapewear / "result.png")],
+            "quality": {"passed": True},
+        }
+        with patch.object(
+            api_server,
+            "generate_shapewear_image",
+            side_effect=[RuntimeError("Hermes request failed (HTTP 429): quota exceeded"), fallback_manifest],
+        ) as generate_skill, patch.object(
+            api_server,
+            "_image_client_for_provider",
+            side_effect=[object(), object()],
+        ), patch.object(api_server, "_provider_available", return_value=(True, None)):
+            api_server._generate_shapewear_image_with_fallback(
+                job,
+                {},
+                image=None,
+                references=None,
+                output_dir=self.shapewear,
+            )
+        self.assertEqual(
+            [call.kwargs.get("resume_task_id") for call in generate_skill.call_args_list],
+            ["old-task", None],
+        )
+        self.assertIsNone(job.provider_task_id)
 
     @patch("api_server.generate_model_outfit_image")
     def test_model_outfit_swap_job_forwards_model_and_outfit_paths(self, generate_skill) -> None:

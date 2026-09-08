@@ -90,12 +90,16 @@ GPT_IMAGE_2_IMAGE_FIDELITY_CONTRACT = (
     "manual review."
 )
 GPT_IMAGE_2_PRESENTATION_GUIDANCE = (
-    "GPT-IMAGE-2 DISPLAY GUIDANCE (secondary to source lock): If the brief does "
-    "not explicitly ask for try-on, prefer a product-only flat-lay or mannequin "
-    "view. If a model is requested, use one adult fully covered model without "
-    "changing body shape. Keep the complete garment centered and readable, with "
-    "a clear in-focus view of fabric texture and construction; do not hide seams "
-    "or edges behind blur, props, or dramatic shadow."
+    "GPT-IMAGE-2 DISPLAY GUIDANCE (secondary to source lock): Choose presentation "
+    "from the selected advertising template. For product_detail or luxury_fashion, "
+    "prefer a product-only flat-lay or headless mannequin. For fashion_campaign, show "
+    "one adult woman fully wearing the same garment as a high-end fashion campaign "
+    "still; do not convert it into a packshot or a phone UGC selfie. For tiktok_ugc, "
+    "show one adult woman fully wearing the same garment in a standing mirror/try-on "
+    "still; do not convert UGC into a product-only packshot. Keep the model adult, "
+    "fully covered, and naturally posed. Keep the complete garment centered and "
+    "readable, with fabric texture and construction in focus; do not hide seams or "
+    "edges behind blur, props, or dramatic shadow."
 )
 FORBIDDEN_PATTERNS = (
     r"\bminor\b",
@@ -183,17 +187,70 @@ def _value(request: Mapping[str, Any] | str, key: str, default: str) -> str:
     return default
 
 
+_VIDEO_CLIP_DEFAULTS = {
+    "luxury_brand": ("8", "9:16", "1080x1920"),
+    "fashion_campaign": ("8", "9:16", "1080x1920"),
+    "tiktok_ugc": ("8", "9:16", "1080x1920"),
+    "product_detail": ("5", "9:16", "1080x1920"),
+}
+
+
+def _clip_field(request: Mapping[str, Any] | str, key: str, default: str) -> str:
+    if isinstance(request, Mapping):
+        candidate = request.get(key)
+        if isinstance(candidate, bool):
+            return default
+        if isinstance(candidate, int) and not isinstance(candidate, bool):
+            return str(candidate)
+        if isinstance(candidate, float) and candidate.is_integer():
+            return str(int(candidate))
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return default
+
+
+def _clip_replacements(request: Mapping[str, Any] | str, block_id: str) -> dict[str, str]:
+    duration_default, aspect_default, resolution_default = _VIDEO_CLIP_DEFAULTS.get(
+        block_id, ("8", "9:16", "1080x1920")
+    )
+    aspect_ratio = _clip_field(request, "aspect_ratio", aspect_default)
+    resolution = _clip_field(request, "resolution", "")
+    if not resolution:
+        resolution = {
+            "9:16": "1080x1920",
+            "16:9": "1920x1080",
+            "1:1": "1080x1080",
+        }.get(aspect_ratio, resolution_default)
+    return {
+        "duration_seconds": _clip_field(request, "duration_seconds", duration_default),
+        "aspect_ratio": aspect_ratio,
+        "resolution": resolution,
+    }
+
+
 def _style_id(request: Mapping[str, Any] | str, media_type: str) -> str:
+    block_id = "luxury_fashion" if media_type == "image" else "luxury_brand"
     if isinstance(request, Mapping):
         explicit = request.get("style_id")
         if isinstance(explicit, str) and explicit.strip():
-            return explicit.strip()
-        style = str(request.get("style", "")).lower()
-        if "ugc" in style or "tiktok" in style or "customer" in style:
-            return "tiktok_ugc"
-        if "detail" in style or "macro" in style or "fabric" in style:
-            return "product_detail" if media_type == "image" else "luxury_brand"
-    return "luxury_fashion" if media_type == "image" else "luxury_brand"
+            block_id = explicit.strip()
+        else:
+            style = str(request.get("style", "")).lower()
+            if "ugc" in style or "tiktok" in style or "customer" in style:
+                block_id = "tiktok_ugc"
+            elif "detail" in style or "macro" in style or "fabric" in style:
+                block_id = "product_detail"
+            elif "campaign" in style or "editorial" in style or "服装广告" in style:
+                block_id = "fashion_campaign"
+    if media_type != "image":
+        return {
+            "luxury_fashion": "luxury_brand",
+            "product_detail": "product_detail",
+            "fashion_campaign": "fashion_campaign",
+            "tiktok_ugc": "tiktok_ugc",
+            "luxury_brand": "luxury_brand",
+        }.get(block_id, "luxury_brand")
+    return block_id
 
 
 def _prompt_block(filename: str, block_id: str) -> str:
@@ -240,9 +297,11 @@ def _build_prompt(
         "product": _value(body, "product", "seamless shapewear garment"),
         "color": _value(body, "color", "black"),
         "material": _value(body, "material", "soft compression fabric"),
-        "scene": _value(body, "scene", "a premium bedroom"),
+        "scene": _value(body, "scene", "clean neutral studio, product fully visible and centered"),
         "style": _value(body, "style", "minimal editorial fashion"),
     }
+    if media_type != "image":
+        replacements.update(_clip_replacements(body, block_id))
     for key, value in replacements.items():
         template = template.replace("{" + key + "}", value)
     if media_type != "image":
@@ -410,10 +469,13 @@ def generate_video(
         candidate = request.get("image")
         if isinstance(candidate, str) and candidate.strip():
             image = candidate.strip()
-    if image is None:
+    resume_id = options.get("resume_task_id")
+    if image is None and not resume_id:
         image_request: Mapping[str, Any] | str = request
         image_client = client
         image_options = dict(options)
+        image_options.pop("resume_task_id", None)
+        image_options.pop("on_task_submitted", None)
         if provider == "seedance":
             # Seedance is video-only here; generate its local keyframe through
             # the configured Hermes image provider before uploading it.

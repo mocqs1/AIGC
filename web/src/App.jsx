@@ -70,7 +70,7 @@ const WORKFLOW_OPTIONS = {
   ],
   video: [
     { value: 'video', label: '通用视频' },
-    { value: 'shapewear_video', label: '塑身衣模特试穿' },
+    { value: 'shapewear_video', label: '塑身衣视频素材快速生成' },
   ],
   tiktok_10s: [{ value: 'tiktok_10s', label: 'TikTok 10s 广告' }],
   poster: [{ value: 'poster', label: 'Mono-color 海报' }],
@@ -102,10 +102,118 @@ const POSTER_LAYOUTS = [
 ]
 
 const SHAPEWEAR_STYLES = [
-  { value: 'luxury_fashion', label: 'Luxury Fashion' },
-  { value: 'tiktok_ugc', label: 'TikTok UGC' },
-  { value: 'product_detail', label: 'Product Detail' },
+  { value: 'luxury_fashion', label: '高端棚拍' },
+  { value: 'fashion_campaign', label: '高级服装广告' },
+  { value: 'tiktok_ugc', label: 'TikTok UGC 真人试穿' },
+  { value: 'product_detail', label: '面料工艺特写' },
 ]
+
+const SHAPEWEAR_STYLE_DEMANDS = {
+  product_detail: {
+    scene: '干净中性棚拍，商品完整居中',
+    style: '商业商品静物摄影，面料与结构特写',
+  },
+  luxury_fashion: {
+    scene: '干净中性棚拍，浅灰无缝背景，商品完整居中',
+    style: '高端商业棚拍，纯商品或无头模特',
+  },
+  fashion_campaign: {
+    scene: '高端时装棚或干净建筑空间，全身可见，杂志光影',
+    style: '高级服装广告，成年模特全身着装，时装大片构图',
+  },
+  tiktok_ugc: {
+    scene: '明亮公寓更衣区，全身镜前，自然窗光，竖构图',
+    style: 'TikTok UGC 真人试穿，手机竖拍，成年模特全身着装展示',
+  },
+}
+
+const SHAPEWEAR_STYLE_HINTS = {
+  product_detail: '面料工艺特写：商品完整居中，突出压缩结构和接缝。',
+  luxury_fashion: '高端棚拍模板：纯商品或无头模特，无卧室生活方式。',
+  fashion_campaign: '高级服装广告：成年模特全身着装，杂志大片光影，不是手机 UGC。',
+  tiktok_ugc: '真人试穿模板：成年模特全身着装，竖构图手机视角。',
+}
+
+function shapewearDemandFor(styleId, workflow) {
+  const resolved = workflow === 'tiktok_10s' ? 'tiktok_ugc' : (SHAPEWEAR_STYLE_DEMANDS[styleId] ? styleId : 'product_detail')
+  const demand = SHAPEWEAR_STYLE_DEMANDS[resolved]
+  return { style_id: resolved, scene: demand.scene, style: demand.style }
+}
+
+const SHAPEWEAR_VIDEO_CLIPS = [
+  {
+    id: 'tryon_mirror',
+    label: '试穿全身镜',
+    hint: '更衣区站立试穿，竖版手机机位。',
+    duration_seconds: 8,
+    aspect_ratio: '9:16',
+    resolution: '1080x1920',
+    style_id: 'tiktok_ugc',
+    scene: '明亮公寓更衣区，全身镜前，自然窗光，竖构图',
+    style: '站立试穿短片，手持手机机位，成年模特全身着装',
+  },
+  {
+    id: 'fashion_walk',
+    label: '时装走步',
+    hint: '杂志大片走步，竖版 8 秒。',
+    duration_seconds: 8,
+    aspect_ratio: '9:16',
+    resolution: '1080x1920',
+    style_id: 'fashion_campaign',
+    scene: '高端时装棚或干净建筑空间，全身可见，杂志光影',
+    style: '高级服装广告走步，成年模特全身着装',
+  },
+  {
+    id: 'studio_walk',
+    label: '棚拍走秀',
+    hint: '棚内走步展示轮廓和压缩分区。',
+    duration_seconds: 8,
+    aspect_ratio: '9:16',
+    resolution: '1080x1920',
+    style_id: 'luxury_fashion',
+    scene: '干净高端时装棚，可控灯光，商品完整可见',
+    style: '棚拍走步短片，展示轮廓与面料',
+  },
+  {
+    id: 'fabric_macro',
+    label: '面料特写',
+    hint: '5 秒接缝和压缩结构特写。',
+    duration_seconds: 5,
+    aspect_ratio: '9:16',
+    resolution: '1080x1920',
+    style_id: 'product_detail',
+    scene: '中性棚拍，面料与接缝特写，商品居中',
+    style: '面料工艺短片，突出结构和压缩',
+  },
+  {
+    id: 'landscape_showcase',
+    label: '横版展示',
+    hint: '16:9 横版 8 秒时装展示。',
+    duration_seconds: 8,
+    aspect_ratio: '16:9',
+    resolution: '1920x1080',
+    style_id: 'fashion_campaign',
+    scene: '宽幅高端棚或建筑空间，全身构图',
+    style: '横版时装展示，成年模特全身着装',
+  },
+]
+
+function resolutionForAspect(aspect) {
+  return { '9:16': '1080x1920', '16:9': '1920x1080', '1:1': '1080x1080' }[aspect] || '1080x1920'
+}
+
+function shapewearVideoClipFor(clipId) {
+  const clip = SHAPEWEAR_VIDEO_CLIPS.find((item) => item.id === clipId) || SHAPEWEAR_VIDEO_CLIPS[2]
+  return {
+    clip_id: clip.id,
+    duration_seconds: clip.duration_seconds,
+    aspect_ratio: clip.aspect_ratio,
+    resolution: clip.resolution,
+    style_id: clip.style_id,
+    scene: clip.scene,
+    style: clip.style,
+  }
+}
 
 const TIKTOK_CLOTHING_PURPOSES = [
   { value: 'shop_listing', label: 'Shop listing 主图' },
@@ -118,16 +226,32 @@ const TIKTOK_CLOTHING_STYLES = [
   { value: 'studio_detail', label: 'Studio detail 工艺细节' },
   { value: 'creator_ugc', label: 'Creator UGC 原生感' },
 ]
+const GENERIC_IMAGE_DEFAULTS = {
+  product: '哑光玻璃香水瓶',
+  scene: '干净中性棚拍，浅灰无缝背景',
+  style: '商业静物摄影',
+  color: '',
+  material: '',
+  target_market: '',
+  style_id: '',
+  clip_id: '',
+  duration_seconds: '',
+  aspect_ratio: '',
+  resolution: '',
+  prompt: '',
+}
 
-const INITIAL_FORM = {
+const SHAPEWEAR_FORM_DEFAULTS = {
   product: '黑色高腰塑身衣',
-  scene: '高级卧室',
-  style: 'SKIMS 高级广告感',
   color: '黑色',
   material: '无缝高弹塑形面料',
   target_market: '美国',
-  style_id: 'tiktok_ugc',
-  prompt: '',
+  style_id: 'product_detail',
+  ...SHAPEWEAR_STYLE_DEMANDS.product_detail,
+}
+
+const INITIAL_FORM = {
+  ...GENERIC_IMAGE_DEFAULTS,
   imageProvider: 'hermes',
   outfitProvider: 'hermes',
   provider: 'veo',
@@ -1090,14 +1214,14 @@ function FormPanel({ mode, form, providers, modules, modelCatalog, assets, loadi
         {isTikTokClothing && <TikTokClothingFields form={form} onChange={onFieldChange} />}
         {!isOutfitSwap && !isClothingImage && !isTikTokClothing && !isPoster && <section className="field-section">
           <div className="section-heading-row">
-            <div><h3>生成需求</h3><p>填写结构化信息，系统将优化为英文 Prompt。</p></div>
+            <div><h3>生成需求</h3><p>{isShapewear ? '广告模板会同步改写场景和风格；改模板后请先预览 Prompt。' : '填写结构化信息，系统将优化为英文 Prompt。'}</p></div>
           </div>
-          <InputField label="产品描述" value={form.product} onChange={(value) => onFieldChange('product', value)} placeholder="例如：黑色高腰塑身衣" required={!directPrompt} disabled={directPrompt} />
-          <InputField label="场景" value={form.scene} onChange={(value) => onFieldChange('scene', value)} placeholder="例如：高级卧室" required={!directPrompt} disabled={directPrompt} />
-          <InputField label="风格" value={form.style} onChange={(value) => onFieldChange('style', value)} placeholder="例如：高级时尚广告" required={!directPrompt} disabled={directPrompt} />
+          <InputField label="产品描述" value={form.product} onChange={(value) => onFieldChange('product', value)} placeholder={isShapewear ? '例如：黑色高腰塑身衣' : '例如：哑光玻璃香水瓶'} required={!directPrompt} disabled={directPrompt} />
+          <InputField label="场景" value={form.scene} onChange={(value) => onFieldChange('scene', value)} placeholder={isShapewear ? (SHAPEWEAR_STYLE_DEMANDS[form.style_id]?.scene || SHAPEWEAR_STYLE_DEMANDS.product_detail.scene) : '例如：干净中性棚拍，浅灰无缝背景'} required={!directPrompt} disabled={directPrompt} />
+          <InputField label="风格" value={form.style} onChange={(value) => onFieldChange('style', value)} placeholder={isShapewear ? (SHAPEWEAR_STYLE_DEMANDS[form.style_id]?.style || SHAPEWEAR_STYLE_DEMANDS.product_detail.style) : '例如：商业静物摄影'} required={!directPrompt} disabled={directPrompt} />
         </section>}
         {isShapewear && <section className="field-section shapewear-fields">
-          <div className="section-heading-row"><div><h3>塑身衣预设</h3><p>10 秒、9:16 为 Prompt 目标规格。</p></div></div>
+          <div className="section-heading-row"><div><h3>塑身衣预设</h3><p>{SHAPEWEAR_STYLE_HINTS[form.style_id] || SHAPEWEAR_STYLE_HINTS.product_detail}</p></div></div>
           <div className="field-grid">
             <InputField label="颜色" value={form.color} onChange={(value) => onFieldChange('color', value)} placeholder="黑色" />
             <InputField label="材质" value={form.material} onChange={(value) => onFieldChange('material', value)} placeholder="无缝高弹面料" />
@@ -1105,9 +1229,21 @@ function FormPanel({ mode, form, providers, modules, modelCatalog, assets, loadi
           <InputField label="目标市场" value={form.target_market} onChange={(value) => onFieldChange('target_market', value)} placeholder="美国" />
           <label className="field"><span className="field-label">广告模板</span>
             <select value={form.style_id} onChange={(event) => onFieldChange('style_id', event.target.value)}>
-              {SHAPEWEAR_STYLES.filter((style) => activeWorkflow === 'shapewear_image' || style.value !== 'product_detail').map((style) => <option value={style.value} key={style.value}>{style.label}</option>)}
+              {SHAPEWEAR_STYLES.filter((style) => activeWorkflow === 'shapewear_image' || activeWorkflow === 'shapewear_video' || style.value !== 'product_detail').map((style) => <option value={style.value} key={style.value}>{style.label}</option>)}
             </select>
           </label>
+          {activeWorkflow === 'shapewear_video' && <div className="clip-preset-grid" role="group" aria-label="视频镜头预设">
+            {SHAPEWEAR_VIDEO_CLIPS.map((clip) => {
+              const selected = form.clip_id === clip.id
+              return (
+                <button type="button" key={clip.id} className={classNames('clip-preset', selected && 'is-selected')} onClick={() => onFieldChange('clip_id', clip.id)}>
+                  <strong>{clip.label}</strong>
+                  <small>{clip.hint}</small>
+                  <span className="clip-spec"><span>{clip.duration_seconds}s</span><span>{clip.aspect_ratio}</span><span>{clip.resolution}</span></span>
+                </button>
+              )
+            })}
+          </div>}
         </section>}
         {!isVideo && !isOutfitSwap && !isClothingImage && <section className="field-section"><ImageProviderPicker provider={form.imageProvider || 'hermes'} providers={providers} modules={modules} modelCatalog={modelCatalog} allowedProviders={isTikTokClothing ? ['hermes', 'hermes_volcano'] : undefined} onChange={(value) => onFieldChange('imageProvider', value)} /></section>}
         {isOutfitSwap && <section className="field-section outfit-provider-section" aria-label="模特换装图片模型"><div className="section-heading-row"><div><h3>换装图片模型</h3><p>手动选择生成模型；素材顺序和服装细节锁定不变。</p></div><span className="technical-status is-passed">可切换</span></div><ImageProviderPicker provider={form.outfitProvider || 'hermes'} providers={providers} modules={modules} modelCatalog={modelCatalog} allowedProviders={['hermes', 'hermes_volcano']} label="生成模型" onChange={(value) => onFieldChange('outfitProvider', value)} /></section>}
@@ -1313,7 +1449,20 @@ export default function App() {
   }, [])
 
   const updateField = useCallback((key, value) => {
-    if (key === 'mode') { setMode(value); setForm((current) => ({ ...current, workflow: value })); setError(''); return }
+    if (key === 'mode') {
+      setMode(value)
+      setForm((current) => {
+        if (value === 'image' || value === 'video') {
+          return { ...current, ...GENERIC_IMAGE_DEFAULTS, workflow: value }
+        }
+        if (value === 'tiktok_10s') {
+          return { ...current, ...SHAPEWEAR_FORM_DEFAULTS, ...shapewearDemandFor('tiktok_ugc', value), workflow: value }
+        }
+        return { ...current, workflow: value }
+      })
+      setError('')
+      return
+    }
     if (key === 'workflow' && value === 'model_outfit_swap') {
       setForm((current) => ({
         ...current,
@@ -1378,12 +1527,54 @@ export default function App() {
       setError('')
       return
     }
-    if (key === 'workflow' && value === 'shapewear_image') {
+    if (key === 'workflow' && (value === 'image' || value === 'video')) {
       setForm((current) => ({
         ...current,
+        ...GENERIC_IMAGE_DEFAULTS,
         workflow: value,
         imageProvider: current.imageProvider || 'hermes',
         referenceImages: [],
+      }))
+      setError('')
+      return
+    }
+    if (key === 'workflow' && (value === 'shapewear_image' || value === 'shapewear_video' || value === 'tiktok_10s')) {
+      const styleId = value === 'tiktok_10s' ? 'tiktok_ugc' : (value === 'shapewear_video' ? 'luxury_fashion' : SHAPEWEAR_FORM_DEFAULTS.style_id)
+      const clip = value === 'shapewear_video' ? shapewearVideoClipFor('studio_walk') : { clip_id: '', duration_seconds: '', aspect_ratio: '', resolution: '' }
+      setForm((current) => ({
+        ...current,
+        ...SHAPEWEAR_FORM_DEFAULTS,
+        ...shapewearDemandFor(styleId, value),
+        ...clip,
+        workflow: value,
+        imageProvider: current.imageProvider || 'hermes',
+        referenceImages: [],
+      }))
+      setError('')
+      return
+    }
+    if (key === 'style_id') {
+      setForm((current) => {
+        const next = {
+          ...current,
+          ...shapewearDemandFor(value, current.workflow),
+          prompt: '',
+        }
+        if (current.workflow === 'shapewear_video') {
+          const matchingClip = SHAPEWEAR_VIDEO_CLIPS.find((clip) => clip.style_id === value && (current.clip_id ? clip.id === current.clip_id : true))
+            || SHAPEWEAR_VIDEO_CLIPS.find((clip) => clip.style_id === value)
+          if (matchingClip) Object.assign(next, shapewearVideoClipFor(matchingClip.id))
+        }
+        return next
+      })
+      setError('')
+      return
+    }
+    if (key === 'clip_id') {
+      setForm((current) => ({
+        ...current,
+        ...shapewearVideoClipFor(value),
+        prompt: '',
       }))
       setError('')
       return
@@ -1491,8 +1682,10 @@ export default function App() {
     }
     const request = Object.fromEntries(Object.entries({
       product: form.product, scene: form.scene, style: form.style, color: form.color, material: form.material,
-      target_market: form.target_market, style_id: form.style_id, prompt: form.prompt,
-    }).filter(([, value]) => value?.trim?.()))
+      target_market: form.target_market, style_id: form.style_id, clip_id: form.clip_id,
+      duration_seconds: form.duration_seconds, aspect_ratio: form.aspect_ratio, resolution: form.resolution,
+      prompt: form.prompt,
+    }).filter(([, value]) => value?.toString?.().trim?.()))
     const payload = { mode: workflow, request }
     if (payload.mode === 'shapewear_image') {
       payload.provider = form.imageProvider || 'hermes'

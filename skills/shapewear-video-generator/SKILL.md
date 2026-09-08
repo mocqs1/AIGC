@@ -132,11 +132,19 @@ policy-rejection guardrails. Failed or unverifiable semantic checks stay in
 
 ## Decision Rules
 
-- Use `luxury_fashion` for controlled studio/editorial briefs, `tiktok_ugc` for
-  phone-shot customer-review briefs, and `product_detail` for fabric or seam
-  close-ups. Combine one primary block with at most two supporting blocks.
-- Use a human model only when the brief asks for try-on or fit demonstration.
-  Keep the model adult, fully covered, and posed like a normal fashion ad.
+- Use `luxury_fashion` for controlled studio stills (product-only or headless
+  mannequin), `fashion_campaign` for an adult fully covered high-end fashion
+  advertisement, `tiktok_ugc` for a standing mirror/phone-camera try-on still,
+  and `product_detail` for fabric or seam close-ups. Combine one primary block
+  with at most two supporting blocks.
+- The selected advertising template must drive both the prompt block and the
+  structured scene/style fields. Do not keep a product-only studio brief when
+  `fashion_campaign` or `tiktok_ugc` is selected. Keep any on-camera adult fully
+  covered.
+- Video clip presets may send `clip_id`, `duration_seconds`, `aspect_ratio`, and
+  `resolution`. Substitute those values into the video prompt block. Keep
+  `product_detail` on the fabric-macro video block; do not collapse it to the
+  studio-walk template. A landscape clip must keep 16:9 and `1920x1080`.
 - Use image-to-video when a product image or generated keyframe exists and visual
   continuity matters. Use text-to-video only when no reference image is
   available.

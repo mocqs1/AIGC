@@ -810,7 +810,7 @@ def _safe_message(error: Exception) -> tuple[str, str, bool]:
         if "sensitivecontent" in provider_code.lower() or "sensitive content" in provider_message.lower():
             return (
                 "provider_input_rejected",
-                "\u53c2\u8003\u56fe\u7247\u88ab Provider \u5185\u5bb9\u5b89\u5168\u5ba1\u6838\u62d2\u7edd\uff0c\u8bf7\u66f4\u6362\u5408\u89c4\u7684\u6a21\u7279\u56fe\u6216\u5546\u54c1\u56fe",
+                "内容安全审核拒绝了本次请求。Prompt、场景描述或参考图都可能触发。请改成商品静物棚拍：无人物、无卧室/床、无内衣特写、无品牌模仿，并更换合规参考图。",
                 False,
             )
         if (
@@ -915,6 +915,7 @@ def _generate_shapewear_image_with_fallback(
     image: str | None,
     references: list[str] | None,
     output_dir: Path,
+    on_task_submitted=None,
 ) -> tuple[dict[str, Any], str]:
     """Generate a shapewear image and retry once on a quota-style failure."""
     requested_provider = _provider_for_job(job.payload)
@@ -928,6 +929,8 @@ def _generate_shapewear_image_with_fallback(
             available, _ = _provider_available(provider)
             if not available:
                 continue
+            with JOBS_LOCK:
+                job.provider_task_id = None
             _set_job(job, "running", f"{requested_provider} quota exhausted; switching to {provider}")
         try:
             manifest = generate_shapewear_image(
@@ -939,6 +942,8 @@ def _generate_shapewear_image_with_fallback(
                 max_polls=120,
                 image=image,
                 references=references,
+                resume_task_id=job.provider_task_id if index == 0 else None,
+                on_task_submitted=on_task_submitted,
             )
         except Exception as error:
             if index == 0 and _is_provider_quota_error(error):
@@ -966,6 +971,7 @@ def _generate_tiktok_clothing_image_with_fallback(
     *,
     product_images: list[str],
     output_dir: Path,
+    on_task_submitted=None,
 ) -> tuple[dict[str, Any], str]:
     """Generate a TikTok main image, falling back on edit-capability errors."""
     requested_provider = _provider_for_job(job.payload)
@@ -979,6 +985,8 @@ def _generate_tiktok_clothing_image_with_fallback(
             available, _ = _provider_available(provider)
             if not available:
                 continue
+            with JOBS_LOCK:
+                job.provider_task_id = None
             _set_job(job, "running", f"{requested_provider} reference edit unavailable; switching to {provider}")
         try:
             manifest = generate_tiktok_clothing_image(
@@ -989,6 +997,8 @@ def _generate_tiktok_clothing_image_with_fallback(
                 output_dir=output_dir,
                 poll_interval=1,
                 max_polls=120,
+                resume_task_id=job.provider_task_id if index == 0 else None,
+                on_task_submitted=on_task_submitted,
             )
         except Exception as error:
             if index == 0 and _is_provider_fallback_error(error):
@@ -1017,7 +1027,7 @@ def _run_job(job_id: str) -> None:
         def on_task_submitted(task_id: str) -> None:
             with JOBS_LOCK:
                 job.provider_task_id = task_id
-                job.provider_used = _provider_for_job(job.payload)
+                job.provider_used = job.provider_used or _provider_for_job(job.payload)
                 job.status = "running"
                 job.phase = "Provider task accepted; waiting in queue"
                 job.updated_at = _now()
@@ -1080,6 +1090,8 @@ def _run_job(job_id: str) -> None:
                     output_dir=output_dir,
                     poll_interval=1,
                     max_polls=120,
+                    resume_task_id=job.provider_task_id,
+                    on_task_submitted=on_task_submitted,
                 )
                 job.prompt = manifest["prompt"]
                 job.outputs = list(manifest["outputs"])
@@ -1093,6 +1105,7 @@ def _run_job(job_id: str) -> None:
                     request,
                     product_images=product_images,
                     output_dir=output_dir,
+                    on_task_submitted=on_task_submitted,
                 )
                 job.prompt = manifest["prompt"]
                 job.outputs = list(manifest["outputs"])
@@ -1124,6 +1137,8 @@ def _run_job(job_id: str) -> None:
                     output_dir=output_dir,
                     poll_interval=1,
                     max_polls=120,
+                    resume_task_id=job.provider_task_id,
+                    on_task_submitted=on_task_submitted,
                 )
                 job.prompt = manifest["prompt"]
                 job.outputs = list(manifest["outputs"])
@@ -1138,6 +1153,8 @@ def _run_job(job_id: str) -> None:
                     max_polls=120,
                     image=image,
                     references=references,
+                    resume_task_id=job.provider_task_id,
+                    on_task_submitted=on_task_submitted,
                 )
                 job.outputs = [output]
                 job.quality = _basic_quality(output, "image")
@@ -1150,6 +1167,8 @@ def _run_job(job_id: str) -> None:
                 output_dir=output_dir,
                 poll_interval=2,
                 max_polls=120,
+                resume_task_id=job.provider_task_id,
+                on_task_submitted=on_task_submitted,
             )
             job.outputs = [output]
             job.quality = _basic_quality(output, "video")
@@ -1166,6 +1185,7 @@ def _run_job(job_id: str) -> None:
                     image=image,
                     references=references,
                     output_dir=output_dir,
+                    on_task_submitted=on_task_submitted,
                 )
                 job.provider_fallback = manifest.get("provider_fallback")
             else:
@@ -1176,6 +1196,8 @@ def _run_job(job_id: str) -> None:
                     output_dir=output_dir,
                     poll_interval=2,
                     max_polls=120,
+                    resume_task_id=job.provider_task_id,
+                    on_task_submitted=on_task_submitted,
                 )
             job.prompt = manifest["prompt"]
             job.outputs = list(manifest["outputs"])
@@ -1271,11 +1293,13 @@ def _save_jobs() -> None:
                 "provider_used": job.provider_used,
                 "provider_fallback": job.provider_fallback,
                 "provider_task_id": job.provider_task_id,
-                # Only outfit-swap jobs need their inputs to resume an
-                # upstream task. Keep the durable job record small for all
-                # other workflows.
-                "request": job.payload.request if job.payload.mode == "model_outfit_swap" else {},
-                "reference_images": [item.model_dump() for item in job.payload.reference_images] if job.payload.mode == "model_outfit_swap" else [],
+                # In-flight jobs must keep the original request and references so
+                # a process restart can poll the same provider task instead of
+                # submitting a duplicate. Completed jobs keep the same payload so
+                # history can reconstruct the brief without a second generation.
+                "request": job.payload.request,
+                "reference_image": job.payload.reference_image.model_dump() if job.payload.reference_image else None,
+                "reference_images": [item.model_dump() for item in job.payload.reference_images],
                 "prompt": job.prompt,
                 "outputs": [asset_id(path) for path in job.outputs if Path(path).is_file()],
                 "quality": job.quality,
@@ -1299,12 +1323,14 @@ def _load_jobs() -> None:
         return
     if not isinstance(records, list):
         return
+    interrupted = False
     for record in records:
         if not isinstance(record, Mapping) or record.get("status") not in {"succeeded", "failed", "submitted", "running"}:
             continue
         try:
             references = record.get("reference_images") if isinstance(record.get("reference_images"), list) else []
-            payload = GenerationRequest(mode=record["mode"], request=record.get("request") if isinstance(record.get("request"), Mapping) else {}, provider=record.get("provider"), reference_images=references)
+            reference_image = record.get("reference_image") if isinstance(record.get("reference_image"), Mapping) else None
+            payload = GenerationRequest(mode=record["mode"], request=record.get("request") if isinstance(record.get("request"), Mapping) else {}, provider=record.get("provider"), reference_image=reference_image, reference_images=references)
             outputs = [resolve_asset(item) for item in record.get("outputs", []) if isinstance(item, str)]
             job = GenerationJob(
                 id=str(record["id"]),
@@ -1340,8 +1366,12 @@ def _load_jobs() -> None:
                     "retryable": True,
                 }
                 job.updated_at = _now()
+                interrupted = True
         except (KeyError, ValueError):
             continue
+    if interrupted:
+        _save_jobs()
+
 
 
 def _save_r2_uploads() -> None:

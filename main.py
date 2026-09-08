@@ -110,6 +110,8 @@ def generate_video(
     output_dir: str | Path | None = None,
     max_polls: int = 30,
     poll_interval: float = 0,
+    resume_task_id: str | None = None,
+    on_task_submitted=None,
 ) -> str:
     """Optimize a request, select the video workflow, and save the result."""
     workflow = load_workflow("video")
@@ -139,6 +141,8 @@ def generate_video(
         output_dir=str(destination),
         max_polls=max_polls,
         poll_interval=poll_interval,
+        resume_task_id=resume_task_id,
+        on_task_submitted=on_task_submitted,
     )
 
 

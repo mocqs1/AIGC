@@ -116,6 +116,120 @@ class ShapewearSkillTests(unittest.TestCase):
         self.assertIn("user presentation brief", lowered)
         self.assertIn("warm studio", lowered)
 
+    def test_image_style_id_switches_prompt_and_keeps_scene(self) -> None:
+        from skills.shapewear_video_generator.runtime import _build_prompt
+
+        ugc = _build_prompt(
+            {
+                "product": "black high-waist shapewear",
+                "color": "black",
+                "style_id": "tiktok_ugc",
+                "scene": "bright apartment dressing area, full-length mirror",
+                "style": "TikTok UGC try-on",
+            },
+            "image",
+            provider="hermes",
+        )
+        detail = _build_prompt(
+            {
+                "product": "black high-waist shapewear",
+                "color": "black",
+                "style_id": "product_detail",
+                "scene": "clean neutral studio, product fully visible and centered",
+                "style": "commercial product still",
+            },
+            "image",
+            provider="hermes",
+        )
+        self.assertIn("TikTok UGC try-on still", ugc)
+        self.assertIn("adult woman fully wearing", ugc)
+        self.assertIn("bright apartment dressing area", ugc)
+        self.assertIn("do not convert UGC into a product-only packshot", ugc)
+        self.assertNotIn("product-only or a fully covered headless mannequin", ugc)
+        self.assertIn("product detail photograph", detail)
+        self.assertIn("clean neutral studio", detail)
+        self.assertNotIn("TikTok UGC try-on still", detail)
+
+        campaign = _build_prompt(
+            {
+                "product": "black high-waist shapewear",
+                "color": "black",
+                "style_id": "fashion_campaign",
+                "scene": "luxury fashion studio, full-body magazine lighting",
+                "style": "high-end fashion campaign",
+            },
+            "image",
+            provider="hermes",
+        )
+        self.assertIn("high-end fashion campaign still", campaign)
+        self.assertIn("adult woman fully wearing", campaign)
+        self.assertIn("luxury fashion studio", campaign)
+        self.assertIn("do not convert it into a packshot", campaign)
+        self.assertNotIn("TikTok UGC try-on still", campaign)
+        self.assertNotIn("product-only or a fully covered headless mannequin", campaign)
+
+    def test_video_style_id_maps_fashion_campaign_block(self) -> None:
+        from skills.shapewear_video_generator.runtime import _build_prompt
+
+        prompt = _build_prompt(
+            {
+                "product": "black high-waist shapewear",
+                "color": "black",
+                "style_id": "fashion_campaign",
+                "scene": "luxury fashion studio",
+                "style": "high-end fashion campaign",
+                "material": "seamless compression fabric",
+            },
+            "video",
+        )
+        self.assertIn("high-end fashion campaign commercial", prompt)
+        self.assertIn("adult woman fully wearing", prompt)
+        self.assertNotIn("TikTok UGC shapewear try-on", prompt)
+        self.assertIn("8-second 9:16 1080x1920 clip", prompt)
+        self.assertNotIn("{duration_seconds}", prompt)
+        self.assertNotIn("{aspect_ratio}", prompt)
+        self.assertNotIn("{resolution}", prompt)
+
+    def test_video_prompt_uses_requested_clip_duration_and_landscape_frame(self) -> None:
+        from skills.shapewear_video_generator.runtime import _build_prompt
+
+        prompt = _build_prompt(
+            {
+                "product": "black high-waist shapewear",
+                "color": "black",
+                "style_id": "fashion_campaign",
+                "clip_id": "landscape_showcase",
+                "duration_seconds": 8,
+                "aspect_ratio": "16:9",
+                "resolution": "1920x1080",
+                "scene": "wide luxury studio",
+                "style": "landscape fashion showcase",
+                "material": "seamless compression fabric",
+            },
+            "video",
+        )
+        self.assertIn("8-second 16:9 1920x1080 clip", prompt)
+        self.assertNotIn("1080x1920", prompt)
+
+    def test_video_product_detail_uses_fabric_macro_block(self) -> None:
+        from skills.shapewear_video_generator.runtime import _build_prompt
+
+        prompt = _build_prompt(
+            {
+                "product": "black high-waist shapewear",
+                "color": "black",
+                "style_id": "product_detail",
+                "clip_id": "fabric_macro",
+                "scene": "clean neutral studio, fabric and seam close-up",
+                "style": "fabric construction clip",
+                "material": "seamless compression fabric",
+            },
+            "video",
+        )
+        self.assertIn("shapewear fabric and construction clip", prompt)
+        self.assertIn("5-second 9:16 1080x1920 clip", prompt)
+        self.assertNotIn("luxury shapewear fashion commercial clip", prompt)
+
     def test_hermes_gpt_image_prompt_is_source_first(self):
         from skills.shapewear_video_generator.runtime import (
             GPT_IMAGE_2_IMAGE_FIDELITY_CONTRACT,
@@ -230,6 +344,57 @@ class ShapewearSkillTests(unittest.TestCase):
             self.assertEqual(manifest["workflow"], "shapewear_video")
             self.assertTrue(manifest["quality"]["passed"])
         self.assertEqual(client.submitted[0][1], {"image": "keyframe.png"})
+
+    def test_runtime_video_resume_skips_keyframe_generation(self):
+        from skills.shapewear_video_generator.runtime import generate_video
+
+        client = self.FakeClient(b"skill-video")
+        with tempfile.TemporaryDirectory() as output_dir:
+            with patch("skills.shapewear_video_generator.runtime.generate_image") as generate_image:
+                manifest = generate_video(
+                    {
+                        "product": "beige bodysuit",
+                        "scene": "premium bedroom",
+                        "style": "minimal editorial",
+                        "type": "video",
+                    },
+                    client=client,
+                    output_dir=output_dir,
+                    resume_task_id="persisted-video",
+                )
+        generate_image.assert_not_called()
+        self.assertEqual(client.submitted, [])
+        self.assertEqual(manifest["workflow"], "shapewear_video")
+
+    def test_runtime_video_resume_does_not_forward_resume_to_keyframe(self):
+        from skills.shapewear_video_generator.runtime import generate_video
+
+        generate_video_engine = patch("skills.shapewear_video_generator.runtime.engine_generate_video")
+        with generate_video_engine as engine:
+            engine.return_value = str(Path("generated-video.mp4"))
+            with tempfile.TemporaryDirectory() as output_dir:
+                keyframe = str(Path(output_dir) / "generated-keyframe.png")
+                with patch(
+                    "skills.shapewear_video_generator.runtime.generate_image",
+                    return_value={"outputs": [keyframe]},
+                ) as generate_image:
+                    generate_video(
+                        {
+                            "product": "black bodysuit",
+                            "scene": "premium bedroom",
+                            "style": "luxury fashion",
+                            "type": "video",
+                            "provider": "seedance",
+                        },
+                        image="existing-keyframe.png",
+                        output_dir=output_dir,
+                        resume_task_id="persisted-video",
+                        on_task_submitted=lambda _task_id: None,
+                    )
+            generate_image.assert_not_called()
+            self.assertEqual(engine.call_args.kwargs["resume_task_id"], "persisted-video")
+            self.assertEqual(engine.call_args.kwargs["image"], "existing-keyframe.png")
+
     @patch("skills.shapewear_video_generator.runtime.engine_generate_video")
     def test_seedance_without_keyframe_generates_with_hermes_then_forwards_keyframe(self, generate_video_engine):
         from skills.shapewear_video_generator.runtime import generate_video

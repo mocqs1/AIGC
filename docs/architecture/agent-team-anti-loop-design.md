@@ -1,6 +1,6 @@
 # Agent and Team Anti-Loop Design
 
-Status: implemented control plane, remaining adapter wiring
+Status: implemented
 Date: 2026-09-08
 Owner: AIGC Lead Codex
 
@@ -376,9 +376,10 @@ it cannot be an automatic rollover.
   retries wait `min(30 s, 2^n s)`.
 - [x] Two consecutive completed attempts with no valid progress event pause the
   run with a `no_progress` escalation record.
-- [ ] A remote operation with a recorded idempotency key is inspected before
-  any recovery resubmission. Guard records `attempt_started`; provider adapters
-  still need to inspect remote job state before resubmit.
+- [x] A remote operation with a recorded idempotency key is inspected before
+  any recovery resubmission. Guard records `attempt_started`. Image and video
+  adapters poll a persisted `provider_task_id` and do not submit a replacement
+  job after process restart.
 - [x] A two-node and a self dependency cycle are detected before further worker
   polling; each affected task is paused and the cycle path is recorded.
 - [x] A worker cannot enter `waiting` without a named dependency and deadline.
@@ -388,10 +389,11 @@ it cannot be an automatic rollover.
 - [x] `paused` runs resume only through Lead `resume()` with a new hypothesis.
 - [x] Completed runs are idempotent; a second `complete()` returns the terminal
   record.
-- [ ] State recovery after process interruption preserves counters, does not
+- [x] State recovery after process interruption preserves counters, does not
   duplicate external side effects, and either resumes from a verified checkpoint
-  or returns a stable recovery error. Durable JSON state is in place; adapter
-  inspect-before-resubmit remains open.
+  or returns a stable recovery error. In-flight Studio jobs persist the original
+  request, references, and provider task id; missing task ids fail as
+  `interrupted_job` instead of resubmitting.
 - [x] Ledger and escalation evidence exclude secrets, raw provider responses,
   local source paths, commands, and unbounded model transcripts.
 

@@ -1,31 +1,62 @@
 version: 1
-purpose: shapewear video prompt structures
+purpose: shapewear video clip prompt structures
 prompts:
   - id: luxury_brand
-    label: Luxury Brand
-    duration_seconds: 10
+    label: Studio Walk
+    duration_seconds: 8
     aspect_ratio: "9:16"
     scene: luxury fashion studio
     camera: slow cinematic movement, smooth push-in and restrained lateral track
     action: model walks, touches fabric, and shows waist shaping with natural motion
     prompt: >-
-      luxury shapewear fashion commercial, {product} in {color}, {scene},
+      luxury shapewear fashion commercial clip, {product} in {color}, {scene},
       {style}; slow cinematic movement; adult model walks, touches the fabric,
       and demonstrates the silhouette; highlight {material} texture and seamless
-      construction; elegant lighting, temporal continuity, 10-second vertical
-      9:16 ad
+      construction; elegant lighting, temporal continuity, {duration_seconds}-second
+      {aspect_ratio} {resolution} clip. Keep any on-camera adult fully covered.
+
+  - id: fashion_campaign
+    label: Fashion Walk
+    duration_seconds: 8
+    aspect_ratio: "9:16"
+    scene: luxury fashion studio or clean architectural interior
+    camera: slow cinematic movement, smooth push-in and restrained lateral track
+    action: adult model walks, turns, and shows the garment silhouette
+    prompt: >-
+      high-end fashion campaign commercial, one adult woman fully wearing {product}
+      in {color}, {scene}, {style}; slow cinematic camera; model walks, turns, and
+      demonstrates the silhouette; highlight {material} texture and seamless
+      construction; magazine lighting, temporal continuity, {duration_seconds}-second
+      {aspect_ratio} {resolution} clip. Keep the model adult and fully covered; no
+      bedroom intimacy, no lying pose, no nudity, no competitor branding.
 
   - id: tiktok_ugc
-    label: TikTok UGC
-    duration_seconds: 10
+    label: Try-on Mirror
+    duration_seconds: 8
     aspect_ratio: "9:16"
-    hook: "I can't believe this shapewear fits like this."
-    scene: bedroom mirror selfie
-    camera: handheld iPhone, authentic small movements, eye-level framing
-    action: before and after comparison, fit demonstration, close-up detail, CTA
+    hook: "Wait, this is the same garment on, not a filter."
+    scene: bright apartment dressing area, full-length mirror, natural window light
+    camera: handheld iPhone, authentic small movements, eye-level vertical framing
+    action: standing try-on, turn to show waist and hip, fabric close-up, CTA
     prompt: >-
-      TikTok UGC shapewear review, hook "I can't believe this shapewear fits like
-      this", adult creator in a bedroom mirror selfie, {product} in {color},
-      natural handheld iPhone camera, before-and-after styling comparison, clear
-      fit and fabric detail, honest social-commercial pacing, vertical 9:16,
-      10-second video
+      TikTok UGC shapewear try-on, hook "Wait, this is the same garment on, not a
+      filter", one adult creator fully wearing {product} in {color}, {scene},
+      {style}; natural handheld iPhone camera, standing mirror selfie then a slow
+      turn to show waist-to-hip shaping, brief fabric close-up, honest social
+      commercial pacing, {duration_seconds}-second {aspect_ratio} {resolution} clip.
+      Keep the model adult and fully covered; no bedroom intimacy, no lying pose, no
+      nudity, no competitor branding.
+
+  - id: product_detail
+    label: Fabric Macro
+    duration_seconds: 5
+    aspect_ratio: "9:16"
+    scene: clean neutral studio, fabric and seam close-up
+    camera: locked-off then slow push-in to construction details
+    action: show compression panels, seams, and fabric recovery
+    prompt: >-
+      shapewear fabric and construction clip of {product} in {color}, {scene},
+      {style}; slow push-in to seams, panels, and {material} texture; keep the
+      complete garment readable before the macro; {duration_seconds}-second
+      {aspect_ratio} {resolution} clip. No model required; no text, watermark, or
+      competitor branding.
