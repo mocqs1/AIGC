@@ -1,6 +1,6 @@
-# Requires: Windows PowerShell 5.1+
-# Detects Python 3.11+ and Node.js 18+, installing them when missing.
-# Usage: powershell -File scripts/ensure-runtime.ps1 [-Probe] [-SkipInstall] [-ProjectRoot PATH]
+# Requires: Windows PowerShell 5.1+ or PowerShell 7+.
+# Detects Python 3.11+ and Node.js 18+. Windows can install missing runtimes;
+# macOS/Linux detection works, but automatic install is handled by start-aigc.sh.
 
 [CmdletBinding()]
 param(
@@ -20,6 +20,9 @@ $script:PythonInstallerUrl = "https://www.python.org/ftp/python/3.12.10/python-3
 $script:NodeInstallerUrl = "https://nodejs.org/dist/v22.20.0/node-v22.20.0-x64.msi"
 
 function Update-SessionPath {
+    if ($env:OS -ne "Windows_NT") {
+        return
+    }
     $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $user = [Environment]::GetEnvironmentVariable("Path", "User")
     $parts = @($machine, $user, $env:Path) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
@@ -94,7 +97,16 @@ function Test-UsableNode {
 }
 
 function Find-PythonInstall {
+    param([string]$Root)
     $candidates = New-Object System.Collections.Generic.List[string]
+    if ($Root) {
+        foreach ($guess in @(
+            (Join-Path $Root ".runtime\bootstrap\python\bin\python3"),
+            (Join-Path $Root ".runtime\bootstrap\python\python.exe")
+        )) {
+            $candidates.Add($guess) | Out-Null
+        }
+    }
     $py = Get-CommandPath -Name "py"
     if (-not $py) {
         $py = Get-CommandPath -Name "py.exe"
@@ -122,11 +134,11 @@ function Find-PythonInstall {
         ${env:ProgramFiles},
         ${env:ProgramFiles(x86)}
     )
-    foreach ($root in $roots) {
-        if (-not $root -or -not (Test-Path -LiteralPath $root)) {
+    foreach ($searchRoot in $roots) {
+        if (-not $searchRoot -or -not (Test-Path -LiteralPath $searchRoot)) {
             continue
         }
-        Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+        Get-ChildItem -LiteralPath $searchRoot -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^Python3(1[1-9]|[2-9]\d)$' } |
             ForEach-Object {
                 $exe = Join-Path $_.FullName "python.exe"
@@ -144,16 +156,24 @@ function Find-PythonInstall {
 }
 
 function Find-NodeInstall {
-    $path = Get-CommandPath -Name "node"
-    if ($path -and (Test-UsableNode -Exe $path)) {
-        return $path
+    param([string]$Root)
+    $guesses = New-Object System.Collections.Generic.List[string]
+    if ($Root) {
+        foreach ($guess in @(
+            (Join-Path $Root ".runtime\bootstrap\node\bin\node"),
+            (Join-Path $Root ".runtime\bootstrap\node\node.exe")
+        )) {
+            $guesses.Add($guess) | Out-Null
+        }
     }
-    $guesses = @(
-        (Join-Path ${env:ProgramFiles} "nodejs\node.exe"),
-        (Join-Path $env:LocalAppData "Programs\nodejs\node.exe")
-    )
+    $path = Get-CommandPath -Name "node"
+    if ($path) {
+        $guesses.Add($path) | Out-Null
+    }
+    $guesses.Add((Join-Path ${env:ProgramFiles} "nodejs\node.exe")) | Out-Null
+    $guesses.Add((Join-Path $env:LocalAppData "Programs\nodejs\node.exe")) | Out-Null
     foreach ($guess in $guesses) {
-        if ((Test-Path -LiteralPath $guess) -and (Test-UsableNode -Exe $guess)) {
+        if ($guess -and (Test-Path -LiteralPath $guess) -and (Test-UsableNode -Exe $guess)) {
             return $guess
         }
     }
@@ -164,7 +184,9 @@ function Find-NpmInstall {
     param([string]$NodePath)
     $guesses = New-Object System.Collections.Generic.List[string]
     if ($NodePath) {
-        $guesses.Add((Join-Path (Split-Path -Parent $NodePath) "npm.cmd")) | Out-Null
+        $nodeDir = Split-Path -Parent $NodePath
+        $guesses.Add((Join-Path $nodeDir "npm.cmd")) | Out-Null
+        $guesses.Add((Join-Path $nodeDir "npm")) | Out-Null
     }
     foreach ($name in @("npm.cmd", "npm")) {
         $path = Get-CommandPath -Name $name
@@ -264,13 +286,26 @@ function Install-NodeRuntime {
     Update-SessionPath
 }
 
+function Get-VenvPythonPath {
+    param([Parameter(Mandatory)][string]$Root)
+    $windowsPython = Join-Path $Root ".venv\Scripts\python.exe"
+    $posixPython = Join-Path $Root ".venv\bin\python"
+    if (Test-Path -LiteralPath $windowsPython) {
+        return $windowsPython
+    }
+    if (Test-Path -LiteralPath $posixPython) {
+        return $posixPython
+    }
+    return $windowsPython
+}
+
 function New-ProjectVenv {
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$Python
     )
     $venvDir = Join-Path $Root ".venv"
-    $venvPython = Join-Path $venvDir "Scripts\python.exe"
+    $venvPython = Get-VenvPythonPath -Root $Root
     if ((Test-Path -LiteralPath $venvPython) -and (Test-UsablePython -Exe $venvPython)) {
         return $venvPython
     }
@@ -280,6 +315,7 @@ function New-ProjectVenv {
     }
     Write-Host "Creating project virtual environment..."
     $null = & $Python -m venv $venvDir
+    $venvPython = Get-VenvPythonPath -Root $Root
     if ($LASTEXITCODE -ne 0 -or -not (Test-UsablePython -Exe $venvPython)) {
         throw "Failed to create a Python 3.11+ virtual environment at $venvDir"
     }
@@ -289,10 +325,10 @@ function New-ProjectVenv {
 function Get-RuntimeProbe {
     param([Parameter(Mandatory)][string]$Root)
     Update-SessionPath
-    $python = Find-PythonInstall
-    $node = Find-NodeInstall
+    $python = Find-PythonInstall -Root $Root
+    $node = Find-NodeInstall -Root $Root
     $npm = Find-NpmInstall -NodePath $node
-    $venvPython = Join-Path $Root ".venv\Scripts\python.exe"
+    $venvPython = Get-VenvPythonPath -Root $Root
     return [ordered]@{
         python = @{
             path = $python
@@ -320,32 +356,36 @@ function Get-AigcRuntime {
         [Parameter(Mandatory)][string]$Root,
         [switch]$NoInstall
     )
-    if ($env:OS -ne "Windows_NT") {
-        throw "The one-click installer currently supports Windows only."
-    }
+    $windows = $env:OS -eq "Windows_NT"
 
     Update-SessionPath
-    $python = Find-PythonInstall
+    $python = Find-PythonInstall -Root $Root
     if (-not $python) {
-        if ($NoInstall) {
+        if ($NoInstall -or -not $windows) {
+            if (-not $windows -and -not $NoInstall) {
+                throw "Python 3.11+ was not found. On macOS or Linux, run ./start-aigc.sh to install a project-local runtime."
+            }
             throw "Python 3.11+ was not found."
         }
         Write-Host "Python 3.11+ was not found. Installing it now..."
         Install-PythonRuntime
-        $python = Find-PythonInstall
+        $python = Find-PythonInstall -Root $Root
         if (-not $python) {
             throw "Python 3.11+ is still missing after installation. Close this window, open a new one, and run start-aigc.bat again."
         }
     }
 
-    $node = Find-NodeInstall
+    $node = Find-NodeInstall -Root $Root
     if (-not $node) {
-        if ($NoInstall) {
+        if ($NoInstall -or -not $windows) {
+            if (-not $windows -and -not $NoInstall) {
+                throw "Node.js 18+ was not found. On macOS or Linux, run ./start-aigc.sh to install a project-local runtime."
+            }
             throw "Node.js 18+ was not found."
         }
         Write-Host "Node.js 18+ was not found. Installing it now..."
         Install-NodeRuntime
-        $node = Find-NodeInstall
+        $node = Find-NodeInstall -Root $Root
         if (-not $node) {
             throw "Node.js 18+ is still missing after installation. Close this window, open a new one, and run start-aigc.bat again."
         }

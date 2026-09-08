@@ -11,8 +11,9 @@ or a hosted generation service.
 
 ## Download and install
 
-On Windows, clone the repository and double-click `start-aigc.bat`. The
-launcher installs Python 3.11+ and Node.js 18+ when they are missing, creates
+Clone the repository, copy `.env.example` to `.env`, then start Studio with
+the one-click launcher for your OS. The launcher reuses a usable Python 3.11+
+and Node.js 18+ already on PATH, otherwise installs missing runtimes, creates
 a project virtual environment, installs Python and npm packages, builds the
 UI, and starts Studio.
 
@@ -23,15 +24,27 @@ Copy-Item .env.example .env
 .\start-aigc.bat
 ```
 
+```bash
+git clone https://github.com/mocqs1/AIGC.git
+cd AIGC
+cp .env.example .env
+chmod +x start-aigc.sh stop-aigc.sh
+./start-aigc.sh
+```
+
 Runtime bootstrap order:
 
 1. Reuse a usable Python 3.11+ or Node.js 18+ already on PATH.
-2. Install missing runtimes with `winget` (`Python.Python.3.12`, `OpenJS.NodeJS.LTS`).
-3. If `winget` is unavailable, download the official Python 3.12 and Node.js LTS installers.
+2. On Windows, install missing runtimes with `winget` (`Python.Python.3.12`,
+   `OpenJS.NodeJS.LTS`). If `winget` is unavailable, download the official
+   Python 3.12 and Node.js LTS installers.
+3. On macOS or Linux, download a project-local CPython 3.12
+   (`python-build-standalone`) and Node.js 22 LTS into `.runtime/bootstrap/`
+   when PATH does not already have a usable runtime. No `sudo` is required.
 
-The Node.js MSI fallback may prompt for administrator approval. After a brand-new
-runtime install, if PATH is not refreshed in the current window, close it and
-run `start-aigc.bat` again.
+The Windows Node.js MSI fallback may prompt for administrator approval. After
+a brand-new Windows runtime install, if PATH is not refreshed in the current
+window, close it and run `start-aigc.bat` again.
 
 Manual setup is still available:
 
@@ -47,7 +60,7 @@ cd ..
 ```
 
 On macOS or Linux, activate the virtual environment with
-`source .venv/bin/activate`. Automatic runtime installation is Windows-only.
+`source .venv/bin/activate`.
 
 Requirements: Python 3.11+, Node.js 18+, npm, and a supported provider API
 key for the workflow you want to run.
@@ -81,26 +94,31 @@ On Windows, double-click `start-aigc.bat` or run:
 .\start-aigc.bat
 ```
 
+On macOS or Linux, run:
+
+```bash
+./start-aigc.sh
+```
+
 The launcher checks Python and Node.js, installs missing runtimes and
 dependencies, builds the UI, starts the local API, and opens the studio. Each
 launch picks a random free high port in 49152-65535, skipping common service
 ports such as 8000, 8080, 3000, and 5173. The chosen URL is printed and opened
-automatically.
+automatically (`open` on macOS, `xdg-open` on Linux).
 
-Stop the managed server with:
-
-```powershell
-.\stop-aigc.bat
-```
+Stop the managed server with `.\stop-aigc.bat` on Windows or `./stop-aigc.sh`
+on macOS or Linux.
 
 For a manual backend start:
 
+```bash
 python -m uvicorn api_server:app --host 127.0.0.1 --port 49152
 ```
 
 Open the printed URL. For frontend development, keep the backend running and
 execute `cd web; npm run dev` in another terminal; the Vite proxy uses
-`AIGC_API_PORT` when set.
+`AIGC_API_PORT` when set. The launchers accept `--dev` / `-Dev` and
+`--no-browser` / `-NoBrowser`.
 
 ## Included workflows
 
@@ -174,6 +192,9 @@ uploader/                 Cloudflare R2 upload client and CLI
 web/                      React/Vite studio UI
 tests/                    Unit and contract tests
 docs/                     Product and architecture notes
+start-aigc.bat            Windows one-click launcher
+start-aigc.sh             macOS/Linux one-click launcher
+scripts/ensure-runtime.*  Python/Node detection and install
 ```
 
 Generated media, local inputs, `.env`, runtime logs, and dependency caches are

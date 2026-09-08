@@ -1,4 +1,6 @@
 import json
+import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +11,18 @@ ROOT = Path(__file__).resolve().parents[1]
 ENSURE_RUNTIME = ROOT / "scripts" / "ensure-runtime.ps1"
 START_STUDIO = ROOT / "scripts" / "start-studio.ps1"
 STOP_STUDIO = ROOT / "scripts" / "stop-studio.ps1"
+POSIX_COMMON = ROOT / "scripts" / "posix-common.sh"
+ENSURE_RUNTIME_SH = ROOT / "scripts" / "ensure-runtime.sh"
+START_STUDIO_SH = ROOT / "scripts" / "start-studio.sh"
+STOP_STUDIO_SH = ROOT / "scripts" / "stop-studio.sh"
+START_AIGC_SH = ROOT / "start-aigc.sh"
+STOP_AIGC_SH = ROOT / "stop-aigc.sh"
+BASH_CANDIDATES = (
+    Path(r"D:\Git\bin\bash.exe"),
+    Path(r"D:\Git\usr\bin\bash.exe"),
+    Path("/bin/bash"),
+    Path("/usr/bin/bash"),
+)
 
 
 def _extract_ps_function(source: str, name: str) -> str:
@@ -45,6 +59,48 @@ def _powershell(*args: str, cwd: Path | None = None) -> subprocess.CompletedProc
         errors="replace",
         check=False,
     )
+
+
+def _bash_executable() -> str:
+    for candidate in BASH_CANDIDATES:
+        if candidate.is_file():
+            return str(candidate)
+    from shutil import which
+
+    found = which("bash")
+    if found:
+        return found
+    raise AssertionError("bash is required to verify the POSIX launcher")
+
+
+def _bash(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [_bash_executable(), *args],
+        cwd=cwd or ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def _native_path(value: str) -> Path:
+    path = Path(value)
+    if path.exists():
+        return path
+    if os.name == "nt" and re.match(r"^/[A-Za-z]/", value):
+        return Path(f"{value[1]}:{os.sep}{value[3:].replace('/', os.sep)}")
+    return path
+
+
+def _bash_path(path: Path | str) -> str:
+    value = str(path)
+    if os.name != "nt":
+        return value
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return f"/{value[0].lower()}{value[2:].replace(chr(92), '/')}"
+    return value.replace("\\", "/")
 
 
 class RuntimeBootstrapTests(unittest.TestCase):
@@ -307,6 +363,150 @@ if (-not $oldThrew) { throw 'expected PowerShell Stop to treat python stderr as 
         result = _powershell("-Command", command)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("MISSING_PKG_OK", result.stdout)
+
+    def test_ensure_runtime_no_longer_hard_fails_on_non_windows(self):
+        source = ENSURE_RUNTIME.read_text(encoding="utf-8")
+        self.assertNotIn("The one-click installer currently supports Windows only.", source)
+        self.assertIn("On macOS or Linux, run ./start-aigc.sh", source)
+        self.assertIn("Get-VenvPythonPath", source)
+
+    def test_posix_scripts_parse(self):
+        for script in (
+            POSIX_COMMON,
+            ENSURE_RUNTIME_SH,
+            START_STUDIO_SH,
+            STOP_STUDIO_SH,
+            START_AIGC_SH,
+            STOP_AIGC_SH,
+        ):
+            result = _bash("-n", _bash_path(script))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_posix_probe_reports_usable_python_and_node(self):
+        result = _bash(_bash_path(ENSURE_RUNTIME_SH), "--probe")
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertTrue(payload["python"]["usable"], payload)
+        self.assertTrue(payload["node"]["usable"], payload)
+        self.assertTrue(payload["npm"]["usable"], payload)
+        self.assertGreaterEqual(int(payload["node"]["major"]), 18)
+
+    def test_posix_skip_install_reuses_existing_runtimes_and_creates_venv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = _bash(
+                _bash_path(ENSURE_RUNTIME_SH),
+                "--skip-install",
+                "--project-root",
+                _bash_path(temp_dir),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            venv_python = _native_path(payload["venvPython"])
+            self.assertTrue(venv_python.is_file(), payload)
+            self.assertEqual(venv_python.parent.parent, Path(temp_dir) / ".venv")
+            version = subprocess.run(
+                [str(venv_python), "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            major, minor = (int(part) for part in version.split("."))
+            self.assertGreaterEqual((major, minor), (3, 11))
+
+    def test_posix_find_studio_port_skips_reserved_and_stays_ephemeral(self):
+        script = r"""
+set -euo pipefail
+source "$1"
+STUDIO_PORT_MIN=49152
+STUDIO_PORT_MAX=49170
+RESERVED_STUDIO_PORTS="8000 8080 5173 3000 49152"
+port_in_use() { [[ "$1" == "49153" ]]; }
+port_is_reserved 8000 || { echo '8000 must stay reserved'; exit 1; }
+studio_port_candidate 8000 && { echo 'well-known ports must be rejected'; exit 1; }
+studio_port_candidate 49152 && { echo 'reserved ephemeral ports must be rejected'; exit 1; }
+studio_port_candidate 49153 && { echo 'busy ports must be rejected'; exit 1; }
+seen=""
+for _ in $(seq 1 8); do
+  port="$(find_studio_port)"
+  seen="$seen $port"
+  case " $port " in
+    *" 8000 "*|*" 49152 "*|*" 49153 "*) echo "selected a reserved or busy port: $port"; exit 1 ;;
+  esac
+  if [[ "$port" -lt 49152 || "$port" -gt 49170 ]]; then
+    echo "port out of range: $port"
+    exit 1
+  fi
+done
+echo "PORT_OK$seen"
+"""
+        result = _bash("-c", script, "--", _bash_path(POSIX_COMMON))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PORT_OK", result.stdout)
+
+    def test_posix_stop_treats_child_listener_as_owned(self):
+        script = r"""
+set -euo pipefail
+source "$1"
+foreign="$(foreign_listener_ids "3688" "27860 3688")"
+[[ -z "${foreign// }" ]] || { echo "unexpected foreign owners: $foreign"; exit 1; }
+unrelated="$(foreign_listener_ids "9999" "27860 3688")"
+[[ "${unrelated// }" == "9999" ]] || { echo "unrelated listener must remain foreign: $unrelated"; exit 1; }
+is_aigc_studio_command python " /py/python -m uvicorn api_server:app --host 127.0.0.1 --port 8000" 8000 || {
+  echo "studio command line was not recognized"
+  exit 1
+}
+echo TREE_OWNERSHIP_OK
+"""
+        result = _bash("-c", script, "--", _bash_path(POSIX_COMMON))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("TREE_OWNERSHIP_OK", result.stdout)
+
+    def test_posix_python_install_plans_include_direct_and_mirror_fallbacks(self):
+        source = POSIX_COMMON.read_text(encoding="utf-8")
+        self.assertIn("direct connection", source)
+        self.assertIn("Tsinghua PyPI mirror", source)
+        self.assertIn("Aliyun PyPI mirror", source)
+        self.assertIn("npmmirror registry", source)
+        self.assertIn("--proxy \"\"", source)
+        self.assertNotIn("--prefix", source)
+        self.assertIn("python-build-standalone", source)
+        self.assertIn("nodejs.org/dist/v${NODE_VERSION}", source)
+
+    def test_posix_without_proxy_env_restores_original_values(self):
+        script = r"""
+set -euo pipefail
+source "$1"
+export HTTP_PROXY='http://127.0.0.1:8'
+export HTTPS_PROXY='http://127.0.0.1:9'
+inside="$(run_without_proxy bash -c 'printf "http=%s;https=%s" "${HTTP_PROXY-}" "${HTTPS_PROXY-}"')"
+[[ "$inside" == "http=;https=" ]] || { echo "proxy still visible inside: $inside"; exit 1; }
+[[ "$HTTPS_PROXY" == "http://127.0.0.1:9" ]] || { echo "https proxy was not restored: $HTTPS_PROXY"; exit 1; }
+[[ "$HTTP_PROXY" == "http://127.0.0.1:8" ]] || { echo "http proxy was not restored: $HTTP_PROXY"; exit 1; }
+echo PROXY_OK
+"""
+        result = _bash("-c", script, "--", _bash_path(POSIX_COMMON))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PROXY_OK", result.stdout)
+
+    def test_posix_npm_install_fails_fast_when_package_json_missing(self):
+        script = r"""
+set -euo pipefail
+source "$1"
+web="$2"
+mkdir -p "$web"
+set +e
+output="$(install_npm_packages false "$web" 2>&1)"
+status=$?
+set -e
+[[ "$status" -ne 0 ]] || { echo "expected missing package.json to fail fast"; exit 1; }
+printf '%s' "$output" | grep -q 'package.json' || { echo "unexpected error: $output"; exit 1; }
+printf '%s' "$output" | grep -F -q "$web" || { echo "error did not name web root: $output"; exit 1; }
+echo MISSING_PKG_OK
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = _bash("-c", script, "--", _bash_path(POSIX_COMMON), _bash_path(temp_dir))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("MISSING_PKG_OK", result.stdout)
 
 
 if __name__ == "__main__":
