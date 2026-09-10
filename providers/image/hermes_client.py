@@ -13,7 +13,11 @@ import math
 import mimetypes
 import os
 import re
+import shutil
 import socket
+import struct
+import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -36,6 +40,12 @@ _SEEDREAM_SIZE_BY_ASPECT = {
     "portrait": "1152x2048",
     "landscape": "2048x1152",
 }
+_GPT_IMAGE_SIZE_BY_ASPECT = {
+    "landscape": "1536x1024",
+    "square": "1024x1024",
+    "portrait": "1024x1536",
+}
+
 _IMAGE_MIME_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -43,6 +53,12 @@ _IMAGE_MIME_TYPES = {
     ".webp": "image/webp",
     ".gif": "image/gif",
 }
+# Ark/Seedream JSON bodies and GPT Image edits reject phone-camera stills that
+# arrive at 6000x4000 / 20MB+. Three of those encode to an ~80MB payload and
+# fail in about two seconds without a usable upstream error.
+_PROVIDER_IMAGE_MAX_EDGE = 4096
+_PROVIDER_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+_PROVIDER_IMAGE_FALLBACK_EDGE = 2048
 
 
 class HermesClientError(RuntimeError):
@@ -218,11 +234,13 @@ class HermesClient:
             len(request_body) if request_body is not None else 0,
         )
         response = None
-        attempts = 3 if method.upper() == "GET" and stage in {"query_task", "get_result", "download_result"} else 1
+        status = None
+        response_headers: dict[str, str] = {}
+        raw = b""
+        attempts = 3 if stage in {"submit_generation", "submit_edit", "query_task", "get_result", "download_result"} else 1
         for attempt in range(attempts):
             try:
                 response = self._transport(method, url, headers, request_body, request_timeout)
-                break
             except (HTTPError, URLError, TimeoutError, socket.timeout, OSError) as error:
                 if attempt + 1 >= attempts:
                     elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -247,11 +265,14 @@ class HermesClient:
                     type(error).__name__,
                 )
                 time.sleep(delay)
-        if response is None:
-            raise HermesRequestError(f"Hermes request failed during {stage}")
-        if isinstance(response, tuple) and len(response) == 3:
-            response_status = int(response[0])
-            if response_status in {429, 502, 503, 504} and attempt + 1 < attempts:
+                continue
+            if not isinstance(response, tuple) or len(response) != 3:
+                raise HermesRequestError("Hermes transport returned an invalid response")
+            status, response_headers, raw = response
+            if int(status) in {429, 502, 503, 504} and attempt + 1 < attempts:
+                provider_code, provider_message = self._safe_error_fields(raw)
+                if not self._is_transient_http_error(int(status), provider_code, provider_message):
+                    break
                 delay = min(10.0, 2.0 ** attempt)
                 self._logger.warning(
                     "Hermes request retry stage=%s method=%s path=%s attempt=%s delay=%ss http_status=%s",
@@ -260,17 +281,13 @@ class HermesClient:
                     request_path,
                     attempt + 1,
                     delay,
-                    response_status,
+                    int(status),
                 )
                 time.sleep(delay)
-                try:
-                    response = self._transport(method, url, headers, request_body, request_timeout)
-                except (HTTPError, URLError, TimeoutError, socket.timeout, OSError) as error:
-                    raise HermesRequestError(f"Hermes request failed during {stage}: {type(error).__name__}") from error
-        if isinstance(response, tuple) and len(response) == 3:
-            status, response_headers, raw = response
-        else:
-            raise HermesRequestError("Hermes transport 杩斿洖鏍煎紡鏃犳晥")
+                continue
+            break
+        if response is None or status is None:
+            raise HermesRequestError(f"Hermes request failed during {stage}")
         elapsed_ms = int((time.monotonic() - started) * 1000)
         self._logger.info(
             "Hermes request complete stage=%s method=%s path=%s status=%s elapsed_ms=%s",
@@ -347,16 +364,146 @@ class HermesClient:
         safe_message = cls._sanitize_diagnostic(message) if message else ""
         return safe_code, safe_message
 
+    @staticmethod
+    def _is_transient_http_error(status: int, provider_code: str, provider_message: str) -> bool:
+        """Return whether a 429/5xx response is worth retrying on the same slot.
+
+        Gateway 502/504 and rate limits can recover.  A 503 that names missing
+        compatible accounts is an upstream inventory problem, not a blip.
+        """
+        if status in {429, 502, 504}:
+            return True
+        if status != 503:
+            return False
+        combined = f"{provider_code} {provider_message}".lower()
+        if re.search(r"no available compatible accounts|compatible accounts", combined):
+            return False
+        return True
+
+
     @classmethod
     def _safe_detail(cls, raw: bytes) -> str:
         code, message = cls._safe_error_fields(raw)
         return ": ".join(part for part in (code, message) if part)
 
     @staticmethod
-    def _encode_local(path: str) -> str:
+    def _image_dimensions(data: bytes) -> tuple[int, int] | None:
+        """Return pixel size for common still formats without Pillow."""
+        if len(data) >= 24 and data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return struct.unpack(">II", data[16:24])
+        if len(data) >= 10 and data[:6] in {b"GIF87a", b"GIF89a"}:
+            return struct.unpack("<HH", data[6:10])
+        if len(data) >= 30 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+            if data[12:16] == b"VP8X":
+                return (
+                    1 + int.from_bytes(data[24:27], "little"),
+                    1 + int.from_bytes(data[27:30], "little"),
+                )
+            if data[12:16] == b"VP8 " and data[23:26] == b"\x9d\x01\x2a":
+                return struct.unpack("<HH", data[26:30])
+        if data[:2] == b"\xff\xd8":
+            index = 2
+            length = len(data)
+            while index + 8 < length:
+                if data[index] != 0xFF:
+                    index += 1
+                    continue
+                marker = data[index + 1]
+                if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
+                    index += 2
+                    continue
+                if marker == 0x00:
+                    index += 1
+                    continue
+                segment = struct.unpack(">H", data[index + 2 : index + 4])[0]
+                if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+                    height, width = struct.unpack(">HH", data[index + 5 : index + 9])
+                    return width, height
+                if segment < 2:
+                    break
+                index += 2 + segment
+        return None
+
+    @classmethod
+    def _exceeds_provider_image_limits(cls, data: bytes) -> bool:
+        if len(data) > _PROVIDER_IMAGE_MAX_BYTES:
+            return True
+        dimensions = cls._image_dimensions(data)
+        return bool(dimensions and max(dimensions) > _PROVIDER_IMAGE_MAX_EDGE)
+
+    @staticmethod
+    def _transcode_local_image(path: str, max_edge: int) -> tuple[bytes, str] | None:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None
+        with tempfile.TemporaryDirectory(prefix="aigc-hermes-image-") as temp_root:
+            destination = Path(temp_root) / "prepared.jpg"
+            try:
+                completed = subprocess.run(
+                    [
+                        ffmpeg,
+                        "-nostdin",
+                        "-v",
+                        "error",
+                        "-y",
+                        "-i",
+                        path,
+                        "-vf",
+                        f"scale={max_edge}:{max_edge}:force_original_aspect_ratio=decrease",
+                        "-frames:v",
+                        "1",
+                        "-q:v",
+                        "3",
+                        str(destination),
+                    ],
+                    capture_output=True,
+                    timeout=120,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+            if completed.returncode != 0 or not destination.is_file():
+                return None
+            data = destination.read_bytes()
+            if not data:
+                return None
+            return data, "image/jpeg"
+
+    @classmethod
+    def _too_large_image_error(cls) -> HermesRequestError:
+        return HermesRequestError(
+            "reference image exceeds provider size limits",
+            provider_code="input_image_too_large",
+            provider_message="each image must be at most 4096px and 8MB",
+        )
+
+    @classmethod
+    def _provider_image_payload(cls, path: str) -> tuple[bytes, str]:
         artifact = Path(path)
+        try:
+            original = artifact.read_bytes()
+        except OSError as error:
+            raise HermesRequestError(f"could not read reference image: {error}") from error
         mime = mimetypes.guess_type(artifact.name)[0] or _IMAGE_MIME_TYPES.get(artifact.suffix.lower(), "application/octet-stream")
-        return f"data:{mime};base64,{base64.b64encode(artifact.read_bytes()).decode('ascii')}"
+        if not cls._exceeds_provider_image_limits(original):
+            return original, mime
+        prepared = cls._transcode_local_image(str(artifact), _PROVIDER_IMAGE_MAX_EDGE)
+        if prepared is not None and cls._exceeds_provider_image_limits(prepared[0]):
+            prepared = cls._transcode_local_image(str(artifact), _PROVIDER_IMAGE_FALLBACK_EDGE)
+        if prepared is None or cls._exceeds_provider_image_limits(prepared[0]):
+            raise cls._too_large_image_error()
+        logging.getLogger(__name__).info(
+            "Hermes image downscaled original_bytes=%s prepared_bytes=%s mime=%s",
+            len(original),
+            len(prepared[0]),
+            prepared[1],
+        )
+        return prepared
+
+    @classmethod
+    def _encode_local(cls, path: str) -> str:
+        data, mime = cls._provider_image_payload(path)
+        return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
     @classmethod
     def _image_bytes(cls, value: str) -> tuple[bytes, str, str]:
@@ -387,11 +534,7 @@ class HermesClient:
             extension = mimetypes.guess_extension(mime) or suffix or ".png"
             return data, f"reference-{uuid.uuid4().hex}{extension}", mime
         artifact = Path(candidate)
-        try:
-            data = artifact.read_bytes()
-        except OSError as error:
-            raise HermesRequestError(f"could not read edit source image: {error}") from error
-        mime = mimetypes.guess_type(artifact.name)[0] or _IMAGE_MIME_TYPES.get(artifact.suffix.lower(), "image/png")
+        data, mime = cls._provider_image_payload(str(artifact))
         extension = mimetypes.guess_extension(mime) or artifact.suffix.lower() or ".png"
         return data, os.path.basename(artifact.name) or f"reference-{uuid.uuid4().hex}{extension}", mime
 
@@ -404,11 +547,7 @@ class HermesClient:
         sources: list[str],
     ) -> tuple[bytes, str]:
         """Encode the OpenAI images.edit contract without a third-party SDK."""
-        size = {
-            "landscape": "1536x1024",
-            "square": "1024x1024",
-            "portrait": "1024x1536",
-        }.get(aspect_ratio, "1024x1024")
+        size = _GPT_IMAGE_SIZE_BY_ASPECT.get(aspect_ratio, "1024x1024")
         boundary = f"----AIGC-Hermes-{uuid.uuid4().hex}"
         chunks: list[bytes] = []
 
@@ -489,7 +628,16 @@ class HermesClient:
                     content_type=content_type,
                     stage="submit_edit",
                 )
-            payload = {"model": self.model, "prompt": prompt, "aspect_ratio": aspect_ratio}
+            if self._uses_gpt_image_edit_schema():
+                payload = {
+                    "model": self.model,
+                    "prompt": prompt,
+                    "size": _GPT_IMAGE_SIZE_BY_ASPECT.get(aspect_ratio, "1024x1024"),
+                    "quality": "high",
+                    "n": 1,
+                }
+            else:
+                payload = {"model": self.model, "prompt": prompt, "aspect_ratio": aspect_ratio}
             if image:
                 payload["image_url"] = self._image_input(image)
             if references:

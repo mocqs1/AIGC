@@ -789,12 +789,23 @@ def _is_provider_fallback_error(error: Exception) -> bool:
     Reference-image edits use a different upstream capability from text-only
     image generation.  Some gateways surface an unavailable edit capability
     as a 502 ``upstream_error`` (for example, ``access forbidden``) rather
-    than a 4xx validation error.  The request has no task id in this case, so
-    trying the independently configured image slot is safe.
+    than a 4xx validation error.  Text-to-image GPT Image 2 submissions can
+    also fail with a 502 ``right_codes_task_failed`` before a task id exists.
+    A 503 ``No available compatible accounts`` means the GPT Image slot has
+    no usable upstream account; the independently configured volcano slot
+    can still complete the same job.
     """
     if _is_provider_quota_error(error):
         return True
+    status = getattr(error, "status", None)
+    if status in {429, 502, 503, 504}:
+        return True
     text = str(error).lower()
+    provider_code = str(getattr(error, "provider_code", "") or "").lower()
+    provider_message = str(getattr(error, "provider_message", "") or "").lower()
+    combined = " ".join(part for part in (text, provider_code, provider_message) if part)
+    if re.search(r"right[_\s-]*codes|task_failed|no available compatible accounts|compatible accounts", combined):
+        return True
     return bool(
         re.search(r"\bhttp\s*(?:status\s*)?(?:502|503|504)\b", text)
         and re.search(r"upstream|access forbidden|gateway|temporar|unavailable", text)
@@ -812,6 +823,22 @@ def _safe_message(error: Exception) -> tuple[str, str, bool]:
                 "provider_input_rejected",
                 "内容安全审核拒绝了本次请求。Prompt、场景描述或参考图都可能触发。请改成商品静物棚拍：无人物、无卧室/床、无内衣特写、无品牌模仿，并更换合规参考图。",
                 False,
+            )
+        if provider_code.lower() == "input_image_too_large" or "exceeds provider size limits" in f"{provider_code} {provider_message} {message}".lower():
+            return (
+                "provider_request_invalid",
+                "参考图过大。请换成单边不超过 4096 像素、单张不超过 8MB 的图片后重试。",
+                False,
+            )
+        if error.status == 503 and re.search(
+            r"no available compatible accounts|compatible accounts",
+            f"{provider_code} {provider_message}",
+            re.IGNORECASE,
+        ):
+            return (
+                "provider_capability_unavailable",
+                "GPT Image 2 当前没有可用上游账号。塑身衣任务会自动切到 Hermes 火山；若仍失败，请检查 GPT Image 账号池或手动切换图片模型。",
+                True,
             )
         if (
             error.status in {401, 403, 502}
@@ -839,6 +866,7 @@ def _safe_message(error: Exception) -> tuple[str, str, bool]:
     # Provider exceptions may embed a signed URL or a deployment detail. Keep
     # the diagnostic in server-side logs only and return a stable UI message.
     return "generation_failed", "生成任务失败，请检查 Provider 状态后重试", True
+
 
 
 def _structured_request(request: Mapping[str, Any], media_type: str) -> dict[str, Any]:
@@ -917,7 +945,7 @@ def _generate_shapewear_image_with_fallback(
     output_dir: Path,
     on_task_submitted=None,
 ) -> tuple[dict[str, Any], str]:
-    """Generate a shapewear image and retry once on a quota-style failure."""
+    """Generate a shapewear image and retry once on quota or gateway failure."""
     requested_provider = _provider_for_job(job.payload)
     candidates = [requested_provider]
     fallback = _IMAGE_PROVIDER_FALLBACKS.get(requested_provider)
@@ -931,7 +959,7 @@ def _generate_shapewear_image_with_fallback(
                 continue
             with JOBS_LOCK:
                 job.provider_task_id = None
-            _set_job(job, "running", f"{requested_provider} quota exhausted; switching to {provider}")
+            _set_job(job, "running", f"{requested_provider} unavailable; switching to {provider}")
         try:
             manifest = generate_shapewear_image(
                 request,
@@ -946,7 +974,7 @@ def _generate_shapewear_image_with_fallback(
                 on_task_submitted=on_task_submitted,
             )
         except Exception as error:
-            if index == 0 and _is_provider_quota_error(error):
+            if index == 0 and _is_provider_fallback_error(error):
                 first_error = error
                 continue
             raise
@@ -957,7 +985,7 @@ def _generate_shapewear_image_with_fallback(
             manifest["provider_fallback"] = {
                 "from": requested_provider,
                 "to": provider,
-                "reason": "quota_or_capacity",
+                "reason": "quota_or_gateway",
             }
         return manifest, provider
     if first_error is not None:

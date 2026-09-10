@@ -58,6 +58,31 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn("切换 Hermes 火山", message)
         self.assertFalse(retryable)
 
+    def test_no_compatible_accounts_error_is_actionable_and_retryable(self) -> None:
+        error = HermesRequestError(
+            "Hermes request failed (HTTP 503): api_error: No available compatible accounts",
+            status=503,
+            provider_code="api_error",
+            provider_message="No available compatible accounts",
+        )
+        code, message, retryable = api_server._safe_message(error)
+        self.assertEqual(code, "provider_capability_unavailable")
+        self.assertIn("Hermes \u706b\u5c71", message)
+        self.assertTrue(retryable)
+
+    def test_oversized_reference_image_error_is_actionable_and_non_retryable(self) -> None:
+        error = HermesRequestError(
+            "reference image exceeds provider size limits",
+            provider_code="input_image_too_large",
+            provider_message="each image must be at most 4096px and 8MB",
+        )
+        code, message, retryable = api_server._safe_message(error)
+        self.assertEqual(code, "provider_request_invalid")
+        self.assertFalse(retryable)
+        self.assertIn("4096", message)
+        self.assertIn("8MB", message)
+
+
     def setUp(self) -> None:
         self.client = TestClient(api_server.app)
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -370,6 +395,83 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(manifest["provider_fallback"]["from"], "hermes")
         self.assertEqual([call.kwargs["provider"] for call in generate_skill.call_args_list], ["hermes", "hermes_volcano"])
         self.assertEqual([call.kwargs.get("resume_task_id") for call in generate_skill.call_args_list], [None, None])
+
+    def test_shapewear_image_falls_back_on_right_codes_task_failed(self) -> None:
+        payload = api_server.GenerationRequest(mode="shapewear_image", provider="hermes", request={})
+        job = api_server.GenerationJob(id="shapewear-right-codes-fallback", payload=payload)
+        fallback_manifest = {
+            "prompt": "prompt",
+            "outputs": [str(self.shapewear / "result.png")],
+            "quality": {"passed": True},
+        }
+        gateway_error = HermesRequestError(
+            "Hermes request failed (HTTP 502): right_codes_task_failed: Right Codes image task failed",
+            status=502,
+            provider_code="right_codes_task_failed",
+            provider_message="Right Codes image task failed",
+        )
+        with patch.object(
+            api_server,
+            "generate_shapewear_image",
+            side_effect=[gateway_error, fallback_manifest],
+        ) as generate_skill, patch.object(
+            api_server,
+            "_image_client_for_provider",
+            side_effect=[object(), object()],
+        ), patch.object(api_server, "_provider_available", return_value=(True, None)):
+            manifest, provider = api_server._generate_shapewear_image_with_fallback(
+                job,
+                {},
+                image=None,
+                references=None,
+                output_dir=self.shapewear,
+            )
+        self.assertEqual(provider, "hermes_volcano")
+        self.assertEqual(manifest["provider_fallback"]["reason"], "quota_or_gateway")
+        self.assertEqual(
+            [call.kwargs["provider"] for call in generate_skill.call_args_list],
+            ["hermes", "hermes_volcano"],
+        )
+
+    def test_shapewear_image_falls_back_on_no_compatible_accounts(self) -> None:
+        payload = api_server.GenerationRequest(mode="shapewear_image", provider="hermes", request={})
+        job = api_server.GenerationJob(id="shapewear-no-accounts-fallback", payload=payload)
+        fallback_manifest = {
+            "prompt": "prompt",
+            "outputs": [str(self.shapewear / "result.png")],
+            "quality": {"passed": True},
+        }
+        account_error = HermesRequestError(
+            "Hermes request failed (HTTP 503): api_error: No available compatible accounts",
+            status=503,
+            provider_code="api_error",
+            provider_message="No available compatible accounts",
+        )
+        with patch.object(
+            api_server,
+            "generate_shapewear_image",
+            side_effect=[account_error, fallback_manifest],
+        ) as generate_skill, patch.object(
+            api_server,
+            "_image_client_for_provider",
+            side_effect=[object(), object()],
+        ), patch.object(api_server, "_provider_available", return_value=(True, None)):
+            manifest, provider = api_server._generate_shapewear_image_with_fallback(
+                job,
+                {},
+                image=None,
+                references=None,
+                output_dir=self.shapewear,
+            )
+        self.assertEqual(provider, "hermes_volcano")
+        self.assertEqual(manifest["provider_fallback"]["from"], "hermes")
+        self.assertEqual(
+            [call.kwargs["provider"] for call in generate_skill.call_args_list],
+            ["hermes", "hermes_volcano"],
+        )
+        self.assertTrue(api_server._is_provider_fallback_error(account_error))
+
+
 
     def test_shapewear_image_does_not_fallback_on_validation_error(self) -> None:
         payload = api_server.GenerationRequest(mode="shapewear_image", provider="hermes", request={})

@@ -4,6 +4,7 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from providers.image.hermes_client import HermesClient, HermesConfigurationError, HermesRequestError
 from providers.image.image_generator import generate_image
@@ -168,6 +169,73 @@ class HermesClientTests(unittest.TestCase):
             with self.assertRaises(HermesConfigurationError):
                 client.submit_generation("edit", image=str(source))
 
+
+    def test_gpt_image_2_text_generation_uses_openai_size_quality_and_n(self):
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append((method, url, headers, body, timeout))
+            payload = {"data": [{"b64_json": base64.b64encode(b"generated-image").decode("ascii")}]}
+            return 200, {"Content-Type": "application/json"}, json.dumps(payload).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = generate_image(
+                "studio product photo",
+                client=HermesClient(api_url="https://hermes.example/v1", api_key="secret", transport=transport),
+                aspect_ratio="portrait",
+                output_dir=temporary,
+            )
+            self.assertEqual(Path(output).read_bytes(), b"generated-image")
+            payload = json.loads(calls[0][3].decode("utf-8"))
+            self.assertEqual(calls[0][1], "https://hermes.example/v1/images/generations")
+            self.assertEqual(payload["model"], "gpt-image-2")
+            self.assertEqual(payload["prompt"], "studio product photo")
+            self.assertEqual(payload["size"], "1024x1536")
+            self.assertEqual(payload["quality"], "high")
+            self.assertEqual(payload["n"], 1)
+            self.assertNotIn("aspect_ratio", payload)
+
+    def test_submit_generation_retries_gateway_502_then_succeeds(self):
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append((method, url, headers, body, timeout))
+            if len(calls) == 1:
+                return 502, {"Content-Type": "application/json"}, json.dumps({"code": "right_codes_task_failed", "message": "Right Codes image task failed"}).encode("utf-8")
+            payload = {"data": [{"b64_json": base64.b64encode(b"generated-image").decode("ascii")}]}
+            return 200, {"Content-Type": "application/json"}, json.dumps(payload).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch("providers.image.hermes_client.time.sleep"):
+            output = generate_image(
+                "studio product photo",
+                client=HermesClient(api_url="https://hermes.example/v1", api_key="secret", transport=transport),
+                output_dir=temporary,
+            )
+            self.assertEqual(Path(output).read_bytes(), b"generated-image")
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(json.loads(calls[0][3].decode("utf-8"))["size"], "1024x1024")
+
+    def test_submit_edit_does_not_retry_no_compatible_accounts(self):
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append((method, url, headers, body, timeout))
+            return 503, {"Content-Type": "application/json"}, json.dumps({"code": "api_error", "message": "No available compatible accounts"}).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch("providers.image.hermes_client.time.sleep") as sleep:
+            source = Path(temporary) / "source.png"
+            source.write_bytes(b"source")
+            client = HermesClient(api_url="https://hermes.example/v1", api_key="secret", transport=transport)
+            with self.assertRaises(HermesRequestError) as raised:
+                client.submit_generation("edit with product", image=str(source))
+            self.assertEqual(raised.exception.status, 503)
+            self.assertEqual(raised.exception.provider_code, "api_error")
+            self.assertEqual(raised.exception.provider_message, "No available compatible accounts")
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(str(calls[0][1]).endswith("/images/edits"))
+            sleep.assert_not_called()
+
+
     def test_seedream_uses_ordered_image_array_and_b64_response(self):
         calls = []
 
@@ -267,6 +335,55 @@ class HermesClientTests(unittest.TestCase):
         client = HermesClient(api_url="https://127.0.0.1/v1", api_key="secret")
         with self.assertRaises(ValueError):
             client.test_connection()
+
+    def test_oversized_local_image_is_downscaled_before_seedream_submit(self):
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append(json.loads(body.decode("utf-8")))
+            return 200, {"Content-Type": "application/json"}, b'{"data":[{"b64_json":"aW1hZ2U="}]}'
+
+        prepared = b"\xff\xd8\xff\xdbprepared-jpeg"
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "phone.png"
+            source.write_bytes(_oversized_png_header())
+            with mock.patch.object(HermesClient, "_transcode_local_image", return_value=(prepared, "image/jpeg")) as transcode:
+                HermesClient(
+                    api_url="https://ark.cn-beijing.volces.com/api/v3",
+                    api_key="secret",
+                    model="doubao-seedream-5-0-pro-260628",
+                    transport=transport,
+                ).submit_generation("prompt", image=str(source))
+
+        transcode.assert_called_once()
+        encoded = calls[0]["image"]
+        self.assertTrue(encoded.startswith("data:image/jpeg;base64,"))
+        self.assertEqual(base64.b64decode(encoded.split(",", 1)[1]), prepared)
+
+    def test_oversized_local_image_without_ffmpeg_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "phone.png"
+            source.write_bytes(_oversized_png_header())
+            with mock.patch("providers.image.hermes_client.shutil.which", return_value=None):
+                with self.assertRaises(HermesRequestError) as raised:
+                    HermesClient(
+                        api_url="https://ark.cn-beijing.volces.com/api/v3",
+                        api_key="secret",
+                        model="doubao-seedream-5-0-pro-260628",
+                        transport=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("transport must not run")),
+                    ).submit_generation("prompt", image=str(source))
+        self.assertEqual(raised.exception.provider_code, "input_image_too_large")
+        self.assertIsNone(raised.exception.status)
+
+
+def _oversized_png_header() -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\rIHDR"
+        + (6000).to_bytes(4, "big")
+        + (4000).to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+    )
 
 
 if __name__ == "__main__":
