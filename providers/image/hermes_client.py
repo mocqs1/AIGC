@@ -1,4 +1,4 @@
-﻿"""Configurable Hermes/OpenAI-compatible image task client.
+"""Configurable Hermes/OpenAI-compatible image task client.
 
 The client intentionally uses the standard library so the local workbench can
 talk to Hermes deployments without coupling itself to one SDK version.
@@ -13,11 +13,7 @@ import math
 import mimetypes
 import os
 import re
-import shutil
 import socket
-import struct
-import subprocess
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -28,8 +24,12 @@ from urllib.request import Request
 
 from providers.http_safety import safe_urlopen
 from providers.credential_parser import parse_api_key, parse_api_url
-
-
+from providers.image.compressor import (
+    IMAGE_MIME_TYPES,
+    ImageTooLargeError,
+    prepare_image_bytes,
+    prepare_local_image,
+)
 
 # Ark's Seedream image endpoint uses one ordered ``image`` input instead of
 # the OpenAI-compatible ``image_url``/``reference_image_urls`` pair.  The
@@ -46,19 +46,6 @@ _GPT_IMAGE_SIZE_BY_ASPECT = {
     "portrait": "1024x1536",
 }
 
-_IMAGE_MIME_TYPES = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-}
-# Ark/Seedream JSON bodies and GPT Image edits reject phone-camera stills that
-# arrive at 6000x4000 / 20MB+. Three of those encode to an ~80MB payload and
-# fail in about two seconds without a usable upstream error.
-_PROVIDER_IMAGE_MAX_EDGE = 4096
-_PROVIDER_IMAGE_MAX_BYTES = 8 * 1024 * 1024
-_PROVIDER_IMAGE_FALLBACK_EDGE = 2048
 
 
 class HermesClientError(RuntimeError):
@@ -173,7 +160,8 @@ class HermesClient:
 
     @classmethod
     def _image_input(cls, value: str) -> str:
-        return value if value.startswith(("http://", "https://", "data:")) else cls._encode_local(value)
+        data, _filename, mime = cls._image_bytes(value)
+        return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
     @staticmethod
     def _urlopen_transport(method: str, url: str, headers: Mapping[str, str], body: bytes | None, timeout: float):
@@ -386,89 +374,6 @@ class HermesClient:
         code, message = cls._safe_error_fields(raw)
         return ": ".join(part for part in (code, message) if part)
 
-    @staticmethod
-    def _image_dimensions(data: bytes) -> tuple[int, int] | None:
-        """Return pixel size for common still formats without Pillow."""
-        if len(data) >= 24 and data.startswith(b"\x89PNG\r\n\x1a\n"):
-            return struct.unpack(">II", data[16:24])
-        if len(data) >= 10 and data[:6] in {b"GIF87a", b"GIF89a"}:
-            return struct.unpack("<HH", data[6:10])
-        if len(data) >= 30 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-            if data[12:16] == b"VP8X":
-                return (
-                    1 + int.from_bytes(data[24:27], "little"),
-                    1 + int.from_bytes(data[27:30], "little"),
-                )
-            if data[12:16] == b"VP8 " and data[23:26] == b"\x9d\x01\x2a":
-                return struct.unpack("<HH", data[26:30])
-        if data[:2] == b"\xff\xd8":
-            index = 2
-            length = len(data)
-            while index + 8 < length:
-                if data[index] != 0xFF:
-                    index += 1
-                    continue
-                marker = data[index + 1]
-                if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
-                    index += 2
-                    continue
-                if marker == 0x00:
-                    index += 1
-                    continue
-                segment = struct.unpack(">H", data[index + 2 : index + 4])[0]
-                if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
-                    height, width = struct.unpack(">HH", data[index + 5 : index + 9])
-                    return width, height
-                if segment < 2:
-                    break
-                index += 2 + segment
-        return None
-
-    @classmethod
-    def _exceeds_provider_image_limits(cls, data: bytes) -> bool:
-        if len(data) > _PROVIDER_IMAGE_MAX_BYTES:
-            return True
-        dimensions = cls._image_dimensions(data)
-        return bool(dimensions and max(dimensions) > _PROVIDER_IMAGE_MAX_EDGE)
-
-    @staticmethod
-    def _transcode_local_image(path: str, max_edge: int) -> tuple[bytes, str] | None:
-        ffmpeg = shutil.which("ffmpeg")
-        if not ffmpeg:
-            return None
-        with tempfile.TemporaryDirectory(prefix="aigc-hermes-image-") as temp_root:
-            destination = Path(temp_root) / "prepared.jpg"
-            try:
-                completed = subprocess.run(
-                    [
-                        ffmpeg,
-                        "-nostdin",
-                        "-v",
-                        "error",
-                        "-y",
-                        "-i",
-                        path,
-                        "-vf",
-                        f"scale={max_edge}:{max_edge}:force_original_aspect_ratio=decrease",
-                        "-frames:v",
-                        "1",
-                        "-q:v",
-                        "3",
-                        str(destination),
-                    ],
-                    capture_output=True,
-                    timeout=120,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                return None
-            if completed.returncode != 0 or not destination.is_file():
-                return None
-            data = destination.read_bytes()
-            if not data:
-                return None
-            return data, "image/jpeg"
-
     @classmethod
     def _too_large_image_error(cls) -> HermesRequestError:
         return HermesRequestError(
@@ -478,36 +383,15 @@ class HermesClient:
         )
 
     @classmethod
-    def _provider_image_payload(cls, path: str) -> tuple[bytes, str]:
-        artifact = Path(path)
+    def _prepared_image(cls, data: bytes, *, source_name: str, mime: str | None = None):
         try:
-            original = artifact.read_bytes()
-        except OSError as error:
-            raise HermesRequestError(f"could not read reference image: {error}") from error
-        mime = mimetypes.guess_type(artifact.name)[0] or _IMAGE_MIME_TYPES.get(artifact.suffix.lower(), "application/octet-stream")
-        if not cls._exceeds_provider_image_limits(original):
-            return original, mime
-        prepared = cls._transcode_local_image(str(artifact), _PROVIDER_IMAGE_MAX_EDGE)
-        if prepared is not None and cls._exceeds_provider_image_limits(prepared[0]):
-            prepared = cls._transcode_local_image(str(artifact), _PROVIDER_IMAGE_FALLBACK_EDGE)
-        if prepared is None or cls._exceeds_provider_image_limits(prepared[0]):
-            raise cls._too_large_image_error()
-        logging.getLogger(__name__).info(
-            "Hermes image downscaled original_bytes=%s prepared_bytes=%s mime=%s",
-            len(original),
-            len(prepared[0]),
-            prepared[1],
-        )
-        return prepared
-
-    @classmethod
-    def _encode_local(cls, path: str) -> str:
-        data, mime = cls._provider_image_payload(path)
-        return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+            return prepare_image_bytes(data, source_name=source_name, mime=mime)
+        except ImageTooLargeError as error:
+            raise cls._too_large_image_error() from error
 
     @classmethod
     def _image_bytes(cls, value: str) -> tuple[bytes, str, str]:
-        """Load an edit source and return bytes, filename, and MIME type."""
+        """Load an edit source and return compressed bytes, filename, and MIME type."""
         candidate = value.strip()
         if candidate.lower().startswith("data:"):
             header, separator, encoded = candidate.partition(",")
@@ -518,8 +402,9 @@ class HermesClient:
                 data = base64.b64decode(encoded, validate=True)
             except (ValueError, TypeError) as error:
                 raise HermesRequestError("image data URL is not valid base64") from error
-            extension = mimetypes.guess_extension(mime) or ".png"
-            return data, f"reference-{uuid.uuid4().hex}{extension}", mime
+            prepared = cls._prepared_image(data, source_name="inline", mime=mime)
+            extension = mimetypes.guess_extension(prepared.mime) or ".png"
+            return prepared.data, f"reference-{uuid.uuid4().hex}{extension}", prepared.mime
         if candidate.lower().startswith(("http://", "https://")):
             request = Request(candidate, headers={"Accept": "image/*, application/octet-stream"}, method="GET")
             try:
@@ -530,13 +415,20 @@ class HermesClient:
                 raise HermesRequestError(f"could not download edit source image: {error}") from error
             parsed = urlparse(candidate)
             suffix = Path(parsed.path).suffix.lower()
-            mime = response_type if response_type.startswith("image/") else _IMAGE_MIME_TYPES.get(suffix, "image/png")
-            extension = mimetypes.guess_extension(mime) or suffix or ".png"
-            return data, f"reference-{uuid.uuid4().hex}{extension}", mime
+            mime = response_type if response_type.startswith("image/") else IMAGE_MIME_TYPES.get(suffix, "image/png")
+            name = Path(parsed.path).name or f"remote{suffix or '.png'}"
+            prepared = cls._prepared_image(data, source_name=name, mime=mime)
+            extension = mimetypes.guess_extension(prepared.mime) or suffix or ".png"
+            return prepared.data, f"reference-{uuid.uuid4().hex}{extension}", prepared.mime
         artifact = Path(candidate)
-        data, mime = cls._provider_image_payload(str(artifact))
-        extension = mimetypes.guess_extension(mime) or artifact.suffix.lower() or ".png"
-        return data, os.path.basename(artifact.name) or f"reference-{uuid.uuid4().hex}{extension}", mime
+        try:
+            prepared = prepare_local_image(str(artifact))
+        except ImageTooLargeError as error:
+            raise cls._too_large_image_error() from error
+        except OSError as error:
+            raise HermesRequestError(f"could not read reference image: {error}") from error
+        extension = mimetypes.guess_extension(prepared.mime) or artifact.suffix.lower() or ".png"
+        return prepared.data, os.path.basename(artifact.name) or f"reference-{uuid.uuid4().hex}{extension}", prepared.mime
 
     @classmethod
     def _multipart_edit_body(
@@ -583,15 +475,16 @@ class HermesClient:
 
     def submit_generation(self, prompt: str, *, image: str | None = None, references: list[str] | None = None, aspect_ratio: str = "square") -> Any:
         if self._uses_seedream_schema():
-            ordered_images = []
+            ordered_sources = []
             if image:
-                ordered_images.append(self._image_input(image))
+                ordered_sources.append(image)
             if references:
-                ordered_images.extend(self._image_input(item) for item in references)
-            if len(ordered_images) > _SEEDREAM_MAX_IMAGES:
+                ordered_sources.extend(references)
+            if len(ordered_sources) > _SEEDREAM_MAX_IMAGES:
                 raise HermesRequestError(
                     f"Seedream supports at most {_SEEDREAM_MAX_IMAGES} ordered reference images"
                 )
+            ordered_images = [self._image_input(item) for item in ordered_sources]
             # These are the documented Ark fields.  ``image`` is deliberately
             # a list when there are multiple references so image 1 remains the
             # model and later entries remain garment references.

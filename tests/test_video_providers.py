@@ -1,8 +1,9 @@
-import logging
-import unittest
 import json
+import logging
 import tempfile
+import unittest
 from pathlib import Path
+from unittest import mock
 
 from providers.video.rest_client import TransportResponse
 from providers.video.seedance_provider import SeedanceClient
@@ -113,6 +114,7 @@ class RestProviderTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         payload = json.loads(calls[0][3].decode("utf-8"))
         self.assertTrue(payload["content"][1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
     def test_seedance_uploads_local_image_before_video_submission(self):
         calls = []
 
@@ -148,6 +150,43 @@ class RestProviderTests(unittest.TestCase):
         video_payload = json.loads(calls[1][3].decode("utf-8"))
         self.assertEqual(video_payload["model"], "seedance-2.5-image-to-video")
         self.assertEqual(video_payload["image_urls"], ["https://files.example/images/frame.png"])
+
+    def test_seedance_compresses_oversized_local_png_before_upload(self):
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append((method, url, headers, body, timeout))
+            if url == "https://files.example/api/v1/files/upload/base64":
+                return TransportResponse(
+                    200,
+                    {"Content-Type": "application/json"},
+                    b'{"success":true,"data":{"file_url":"https://files.example/images/frame.jpg"}}',
+                )
+            return TransportResponse(200, {"Content-Type": "application/json"}, b'{"id":"task-1"}')
+
+        jpeg = b"\xff\xd8\xff\xdbprepared-jpeg"
+        with tempfile.TemporaryDirectory() as output_dir:
+            image_path = Path(output_dir) / "frame.png"
+            image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + (b"x" * 40))
+            with mock.patch(
+                "providers.video.seedance_provider.prepare_local_image",
+                return_value=mock.Mock(
+                    data=jpeg,
+                    mime="image/jpeg",
+                    as_data_url=lambda: "data:image/jpeg;base64,prepared",
+                ),
+            ):
+                client = SeedanceClient(
+                    api_key="test-seedance-key",
+                    api_url="https://api.evolink.ai",
+                    upload_api_url="https://files.example",
+                    transport=transport,
+                )
+                client.submit_generation("animate the product", image=str(image_path))
+
+        upload_payload = json.loads(calls[0][3].decode("utf-8"))
+        self.assertTrue(upload_payload["base64_data"].startswith("data:image/jpeg;base64,"))
+        self.assertEqual(upload_payload["file_name"], "frame.jpg")
 
     def test_seedance_rejects_invalid_local_image_before_upload(self):
         client = SeedanceClient(

@@ -1,15 +1,14 @@
 """Seedance video provider adapters for Volcengine Ark and EvoLink."""
 from __future__ import annotations
 
-import base64
 import ipaddress
-import mimetypes
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from config import env_value
 from providers.credential_parser import parse_api_url
+from providers.image.compressor import ImageTooLargeError, prepare_local_image
 
 from .rest_client import RestVideoClient
 
@@ -102,25 +101,7 @@ class SeedanceClient(RestVideoClient):
         self.upload_api_url = parse_api_url(upload_url)
         self.upload_path = upload_path or env_value("SEEDANCE_UPLOAD_PATH", DEFAULT_UPLOAD_PATH)
 
-    def _local_image_data_url(self, image: str) -> str:
-        path = Path(image).expanduser()
-        if not path.is_file():
-            raise ValueError("local Seedance image must be an existing file")
-        if path.suffix.lower() not in UPLOAD_IMAGE_SUFFIXES:
-            raise ValueError("Seedance local image must be a .jpg, .jpeg, .png, or .webp file")
-        try:
-            size = path.stat().st_size
-            if size <= 0:
-                raise ValueError("Seedance local image must not be empty")
-            if size > MAX_UPLOAD_IMAGE_BYTES:
-                raise ValueError("Seedance local image exceeds the 30 MiB upload limit")
-            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-        except OSError as error:
-            raise ValueError("could not read local Seedance image") from error
-        mime_type = mimetypes.types_map.get(path.suffix.lower(), "application/octet-stream")
-        return f"data:{mime_type};base64,{encoded}"
-
-    def _upload_local_image(self, image: str) -> str:
+    def _prepared_local_image(self, image: str):
         path = Path(image).expanduser()
         if not path.is_file():
             raise ValueError("local Seedance image must be an existing file")
@@ -132,17 +113,27 @@ class SeedanceClient(RestVideoClient):
             raise ValueError("could not inspect local Seedance image") from error
         if size <= 0:
             raise ValueError("Seedance local image must not be empty")
-        if size > MAX_UPLOAD_IMAGE_BYTES:
-            raise ValueError("Seedance local image exceeds the 30 MiB upload limit")
         try:
-            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            prepared = prepare_local_image(str(path))
+        except ImageTooLargeError as error:
+            raise ValueError(str(error)) from error
         except OSError as error:
             raise ValueError("could not read local Seedance image") from error
-        mime_type = mimetypes.types_map.get(path.suffix.lower(), "application/octet-stream")
+        if len(prepared.data) > MAX_UPLOAD_IMAGE_BYTES:
+            raise ValueError("Seedance local image exceeds the 30 MiB upload limit")
+        file_name = f"{path.stem}.jpg" if prepared.mime == "image/jpeg" else path.name
+        return prepared, file_name
+
+    def _local_image_data_url(self, image: str) -> str:
+        prepared, _file_name = self._prepared_local_image(image)
+        return prepared.as_data_url()
+
+    def _upload_local_image(self, image: str) -> str:
+        prepared, file_name = self._prepared_local_image(image)
         response = self._request(
             "POST",
             f"{self.upload_api_url}/{self.upload_path.lstrip('/')}",
-            {"base64_data": f"data:{mime_type};base64,{encoded}", "file_name": path.name},
+            {"base64_data": prepared.as_data_url(), "file_name": file_name},
         )
         if not isinstance(response, dict) or response.get("success") is False:
             raise ValueError("Seedance image upload was rejected by the file service")

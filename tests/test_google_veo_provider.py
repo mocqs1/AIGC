@@ -5,8 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from providers.image.compressor import ImageTooLargeError
 from providers.video.google_veo_provider import GoogleVeoClient, _resolve_public_https_target
-from providers.video.rest_client import TransportResponse
+from providers.video.rest_client import TransportResponse, VideoProviderRequestError
 from providers.video.video_generator import generate_video
 
 
@@ -36,12 +37,16 @@ class GoogleVeoProviderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             image_path = Path(temp_dir) / "keyframe.png"
             image_path.write_bytes(b"png-bytes")
-            output_path = generate_video(
-                "animate this shapewear",
-                image=str(image_path),
-                client=client,
-                output_dir=temp_dir,
-            )
+            with patch(
+                "providers.video.google_veo_provider.prepare_local_image",
+                return_value=type("Prepared", (), {"mime": "image/png", "data": b"png-bytes"})(),
+            ):
+                output_path = generate_video(
+                    "animate this shapewear",
+                    image=str(image_path),
+                    client=client,
+                    output_dir=temp_dir,
+                )
             self.assertEqual(Path(output_path).read_bytes(), b"veo-video")
 
         post = calls[0]
@@ -56,6 +61,18 @@ class GoogleVeoProviderTests(unittest.TestCase):
         )
         download = next(call for call in calls if call[1].endswith("/media/video.mp4"))
         self.assertNotIn("x-goog-api-key", download[2])
+
+    def test_oversized_local_image_is_rejected_as_request_error(self) -> None:
+        client = GoogleVeoClient(api_key="test-key", transport=lambda *args, **kwargs: self.fail("transport must not run"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "keyframe.png"
+            image_path.write_bytes(b"png-bytes")
+            with patch(
+                "providers.video.google_veo_provider.prepare_local_image",
+                side_effect=ImageTooLargeError(),
+            ):
+                with self.assertRaises(VideoProviderRequestError):
+                    client.submit_generation("animate", image=str(image_path))
 
     def test_result_download_does_not_forward_api_key(self) -> None:
         calls = []

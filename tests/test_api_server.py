@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 import api_server
 from providers.image.hermes_client import HermesRequestError
+from providers.image.compressor import ImageTooLargeError
 from skills.model_outfit_swap.runtime import FIXED_OUTFIT_PROMPT
 from uploader.config import R2Config
 from uploader.exceptions import R2ConfigurationError
@@ -82,6 +83,12 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn("4096", message)
         self.assertIn("8MB", message)
 
+    def test_image_too_large_error_is_actionable_and_non_retryable(self) -> None:
+        code, message, retryable = api_server._safe_message(ImageTooLargeError())
+        self.assertEqual(code, "provider_request_invalid")
+        self.assertFalse(retryable)
+        self.assertIn("4096", message)
+        self.assertIn("8MB", message)
 
     def setUp(self) -> None:
         self.client = TestClient(api_server.app)
@@ -1061,18 +1068,68 @@ class ApiServerTests(unittest.TestCase):
 
 
     def test_media_import_copies_supported_files_into_managed_root(self) -> None:
-        response = self.client.post(
-            "/api/media/import",
-            files=[("files", ("photo.png", b"\x89PNG\r\n\x1a\npng-data", "image/png"))],
-            data={"relative_paths": ["folder/photo.png"]},
-        )
+        png = b"\x89PNG\r\n\x1a\n" + b"png-data"
+        with patch("api_server.prepare_local_image") as prepare:
+            prepare.return_value = type("Prepared", (), {"data": png, "mime": "image/png"})()
+            response = self.client.post(
+                "/api/media/import",
+                files=[("files", ("photo.png", png, "image/png"))],
+                data={"relative_paths": ["folder/photo.png"]},
+            )
         self.assertEqual(response.status_code, 200)
         assets = response.json()["assets"]
         self.assertEqual(len(assets), 1)
         self.assertTrue(assets[0]["id"].startswith("imported/"))
+        self.assertTrue(assets[0]["id"].endswith("photo.png"))
         self.assertEqual(assets[0]["source"], "local")
         self.assertNotIn(str(self.output_root), response.text)
         self.assertEqual(list(self.imported.rglob("*.txt")), [])
+
+    def test_media_import_transcodes_oversized_png_to_jpeg(self) -> None:
+        png = b"\x89PNG\r\n\x1a\n" + b"png-data"
+        jpeg = b"\xff\xd8\xff\xdbprepared-jpeg"
+        with patch("api_server.prepare_local_image") as prepare:
+            prepare.return_value = type("Prepared", (), {"data": jpeg, "mime": "image/jpeg"})()
+            response = self.client.post(
+                "/api/media/import",
+                files=[("files", ("photo.png", png, "image/png"))],
+                data={"relative_paths": ["folder/photo.png"]},
+            )
+        self.assertEqual(response.status_code, 200)
+        assets = response.json()["assets"]
+        self.assertEqual(len(assets), 1)
+        self.assertTrue(assets[0]["id"].endswith("photo.jpg"))
+        stored = next(self.imported.rglob("*.jpg"))
+        self.assertEqual(stored.read_bytes(), jpeg)
+
+
+    def test_media_import_transcodes_oversized_gif_to_jpeg(self) -> None:
+        gif = b"GIF89a" + (6000).to_bytes(2, "little") + (4000).to_bytes(2, "little")
+        jpeg = b"\xff\xd8\xff\xdbprepared-jpeg"
+        with patch("api_server.prepare_local_image") as prepare:
+            prepare.return_value = type("Prepared", (), {"data": jpeg, "mime": "image/jpeg"})()
+            response = self.client.post(
+                "/api/media/import",
+                files=[("files", ("anim.gif", gif, "image/gif"))],
+                data={"relative_paths": ["folder/anim.gif"]},
+            )
+        self.assertEqual(response.status_code, 200)
+        assets = response.json()["assets"]
+        self.assertEqual(len(assets), 1)
+        self.assertTrue(assets[0]["id"].endswith("anim.jpg"))
+        stored = next(self.imported.rglob("*.jpg"))
+        self.assertEqual(stored.read_bytes(), jpeg)
+
+    def test_media_import_rejects_uncompressible_still(self) -> None:
+        png = b"\x89PNG\r\n\x1a\n" + b"png-data"
+        with patch("api_server.prepare_local_image", side_effect=ImageTooLargeError()):
+            response = self.client.post(
+                "/api/media/import",
+                files=[("files", ("photo.png", png, "image/png"))],
+                data={"relative_paths": ["folder/photo.png"]},
+            )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(list(self.imported.rglob("*")), [])
 
     def test_media_import_rejects_invalid_batch_without_partial_files(self) -> None:
         response = self.client.post(

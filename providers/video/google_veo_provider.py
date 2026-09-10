@@ -7,7 +7,6 @@ import http.client
 import ipaddress
 import json
 import logging
-import mimetypes
 import socket
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -17,7 +16,7 @@ from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Requ
 
 from providers.http_safety import safe_urlopen
 from providers.credential_parser import parse_api_key, parse_api_url
-
+from providers.image.compressor import ImageTooLargeError, prepare_image_bytes, prepare_local_image
 
 from .rest_client import (
     RestVideoClient,
@@ -272,24 +271,30 @@ class GoogleVeoClient:
         if not isinstance(image, str) or not image.strip():
             raise ValueError("image must be a non-empty path, URL, or data URI")
         source = image.strip()
-        if source.startswith("data:"):
-            header, separator, data = source.partition(",")
-            if not separator or ";base64" not in header:
-                raise ValueError("image data URI must contain base64 data")
-            mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
-            base64_data = data
-        elif source.startswith(("http://", "https://")):
-            raw, mime_type = _download_public_image(source, timeout=30.0)
-            base64_data = base64.b64encode(raw).decode("ascii")
-        else:
-            path = Path(source)
-            try:
-                raw = path.read_bytes()
-            except OSError as error:
-                raise VideoProviderRequestError(f"could not read input image {path}: {error}") from error
-            mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-            base64_data = base64.b64encode(raw).decode("ascii")
-        return {"mimeType": mime_type, "data": base64_data}
+        try:
+            if source.startswith("data:"):
+                header, separator, encoded = source.partition(",")
+                if not separator or ";base64" not in header:
+                    raise ValueError("image data URI must contain base64 data")
+                mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
+                try:
+                    raw = base64.b64decode(encoded, validate=True)
+                except (ValueError, TypeError) as error:
+                    raise ValueError("image data URI is not valid base64") from error
+                prepared = prepare_image_bytes(raw, source_name="inline", mime=mime_type)
+            elif source.startswith(("http://", "https://")):
+                raw, mime_type = _download_public_image(source, timeout=30.0)
+                name = Path(urlparse(source).path).name or "remote.png"
+                prepared = prepare_image_bytes(raw, source_name=name, mime=mime_type)
+            else:
+                path = Path(source)
+                try:
+                    prepared = prepare_local_image(str(path))
+                except OSError as error:
+                    raise VideoProviderRequestError(f"could not read input image {path}: {error}") from error
+        except ImageTooLargeError as error:
+            raise VideoProviderRequestError(str(error)) from error
+        return {"mimeType": prepared.mime, "data": base64.b64encode(prepared.data).decode("ascii")}
 
 
 def create_client(**kwargs: Any) -> GoogleVeoClient:

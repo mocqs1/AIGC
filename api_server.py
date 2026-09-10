@@ -72,6 +72,7 @@ from uploader.exceptions import R2ConfigurationError, R2UploadError, R2Validatio
 from uploader.service import upload_image as upload_r2_image
 from uploader.service import upload_video as upload_r2_video
 from providers.image.hermes_client import HermesClient, HermesClientError, HermesRequestError
+from providers.image.compressor import ImageTooLargeError, prepare_local_image
 from providers.liblib.client import LiblibClient, LiblibClientError
 from providers.video.google_veo_provider import GoogleVeoClient
 from providers.video.rest_client import VideoProviderRequestError
@@ -815,19 +816,23 @@ def _is_provider_fallback_error(error: Exception) -> bool:
 def _safe_message(error: Exception) -> tuple[str, str, bool]:
     message = str(error).strip() or "生成任务失败"
     lowered = message.lower()
+    provider_code = (getattr(error, "provider_code", None) or "").strip()
+    if (
+        isinstance(error, ImageTooLargeError)
+        or provider_code.lower() == "input_image_too_large"
+        or "exceeds provider size limits" in lowered
+    ):
+        return (
+            "provider_request_invalid",
+            "参考图过大。请换成单边不超过 4096 像素、单张不超过 8MB 的图片后重试。",
+            False,
+        )
     if isinstance(error, HermesRequestError):
-        provider_code = (getattr(error, "provider_code", None) or "").strip()
         provider_message = (getattr(error, "provider_message", None) or "").strip()
         if "sensitivecontent" in provider_code.lower() or "sensitive content" in provider_message.lower():
             return (
                 "provider_input_rejected",
                 "内容安全审核拒绝了本次请求。Prompt、场景描述或参考图都可能触发。请改成商品静物棚拍：无人物、无卧室/床、无内衣特写、无品牌模仿，并更换合规参考图。",
-                False,
-            )
-        if provider_code.lower() == "input_image_too_large" or "exceeds provider size limits" in f"{provider_code} {provider_message} {message}".lower():
-            return (
-                "provider_request_invalid",
-                "参考图过大。请换成单边不超过 4096 像素、单张不超过 8MB 的图片后重试。",
                 False,
             )
         if error.status == 503 and re.search(
@@ -2358,6 +2363,33 @@ def _media_signature_matches(name: str, header: bytes) -> bool:
     return False
 
 
+_STILL_IMPORT_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def _compress_imported_still(name: str, staged_path: Path) -> tuple[str, Path]:
+    if Path(name).suffix.lower() not in _STILL_IMPORT_SUFFIXES:
+        return name, staged_path
+    try:
+        prepared = prepare_local_image(str(staged_path))
+    except ImageTooLargeError as error:
+        raise ValueError("无法压缩到单边 4096 像素、8MB 上限") from error
+    except OSError as error:
+        raise ValueError("无法读取导入图片") from error
+    suffix = Path(name).suffix.lower()
+    destination = staged_path
+    dest_name = name
+    if prepared.mime == "image/jpeg" and suffix not in {".jpg", ".jpeg"}:
+        dest_name = f"{Path(name).stem}.jpg"
+        destination = staged_path.with_name(f"{staged_path.stem}.jpg")
+    if destination != staged_path:
+        destination.write_bytes(prepared.data)
+        staged_path.unlink(missing_ok=True)
+        return dest_name, destination
+    if destination.read_bytes() != prepared.data:
+        destination.write_bytes(prepared.data)
+    return dest_name, destination
+
+
 def _assets() -> list[dict[str, Any]]:
     assets: list[dict[str, Any]] = []
     for root in OUTPUT_ROOTS:
@@ -2757,6 +2789,12 @@ async def import_media(files: list[UploadFile] = File(...), relative_paths: list
                 continue
             if not _media_signature_matches(name, header):
                 errors.append(f"{name}: 文件内容与扩展名不匹配")
+                staged_path.unlink(missing_ok=True)
+                continue
+            try:
+                staged_name, staged_path = _compress_imported_still(staged_name, staged_path)
+            except ValueError as error:
+                errors.append(f"{name}: {error}")
                 staged_path.unlink(missing_ok=True)
                 continue
             staged.append((staged_name, staged_path))

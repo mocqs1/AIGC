@@ -292,14 +292,30 @@ class HermesClientTests(unittest.TestCase):
             calls.append(json.loads(body.decode("utf-8")))
             return 200, {"Content-Type": "application/json"}, b'{"data":[{"b64_json":"aW1hZ2U="}]}'
 
+        png = b"\x89PNG\r\n\x1a\n" + b"tiny"
+
+        class FakeResponse:
+            headers = {"Content-Type": "image/png"}
+
+            def read(self):
+                return png
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
         client = HermesClient(
             api_url="https://ark.cn-beijing.volces.com/api/v3",
             api_key="secret",
             model="doubao-seedream-5-0-pro-260628",
             transport=transport,
         )
-        client.submit_generation("prompt", image="https://cdn.example/model.png")
+        with mock.patch("providers.image.hermes_client.safe_urlopen", return_value=FakeResponse()):
+            client.submit_generation("prompt", image="https://cdn.example/model.png")
         self.assertIsInstance(calls[0]["image"], str)
+        self.assertTrue(calls[0]["image"].startswith("data:image/png;base64,"))
         with self.assertRaisesRegex(Exception, "at most 10"):
             client.submit_generation(
                 "prompt",
@@ -347,7 +363,10 @@ class HermesClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "phone.png"
             source.write_bytes(_oversized_png_header())
-            with mock.patch.object(HermesClient, "_transcode_local_image", return_value=(prepared, "image/jpeg")) as transcode:
+            with mock.patch(
+                "providers.image.compressor.transcode_image_bytes",
+                return_value=(prepared, "image/jpeg"),
+            ) as transcode:
                 HermesClient(
                     api_url="https://ark.cn-beijing.volces.com/api/v3",
                     api_key="secret",
@@ -355,7 +374,7 @@ class HermesClientTests(unittest.TestCase):
                     transport=transport,
                 ).submit_generation("prompt", image=str(source))
 
-        transcode.assert_called_once()
+        transcode.assert_called()
         encoded = calls[0]["image"]
         self.assertTrue(encoded.startswith("data:image/jpeg;base64,"))
         self.assertEqual(base64.b64decode(encoded.split(",", 1)[1]), prepared)
@@ -364,7 +383,7 @@ class HermesClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "phone.png"
             source.write_bytes(_oversized_png_header())
-            with mock.patch("providers.image.hermes_client.shutil.which", return_value=None):
+            with mock.patch("providers.image.compressor.shutil.which", return_value=None):
                 with self.assertRaises(HermesRequestError) as raised:
                     HermesClient(
                         api_url="https://ark.cn-beijing.volces.com/api/v3",
