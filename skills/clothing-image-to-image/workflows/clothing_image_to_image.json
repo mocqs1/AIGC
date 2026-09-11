@@ -3,7 +3,8 @@
   "skill": "clothing-image-to-image",
   "type": "image",
   "provider": "hermes",
-  "provider_locked": true,
+  "provider_locked": false,
+  "providers": ["hermes", "hermes_volcano"],
   "mode": "image_to_image",
   "steps": [
     "validate_single_garment_reference",

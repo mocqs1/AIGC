@@ -42,6 +42,39 @@ def _validate_provider(workflow: Mapping[str, Any]) -> None:
         raise RuntimeError("workflow provider must be a non-empty string")
 
 
+def _env_image_client(provider: str) -> Any | None:
+    if provider not in {"hermes", "hermes_volcano", "liblib"}:
+        return None
+    prefix = "HERMES" if provider == "hermes" else "HERMES_VOLCANO"
+    default_api_url = "https://aiapi.yicheng.bj.cn/v1" if prefix == "HERMES" else "https://ark.cn-beijing.volces.com/api/v3"
+    default_model = "gpt-image-2" if prefix == "HERMES" else "doubao-seedream-5-0-pro-260628"
+    return HermesClient(
+        api_url=env_value(f"{prefix}_API_URL", default_api_url) or default_api_url,
+        api_key=env_value(f"{prefix}_API_KEY", "") or "",
+        model=env_value(f"{prefix}_MODEL", default_model) or default_model,
+        submit_path=env_value(f"{prefix}_SUBMIT_PATH", "/images/generations") or "/images/generations",
+        edit_path=env_value(f"{prefix}_EDIT_PATH", "/images/edits") or "/images/edits",
+        status_path=env_value(f"{prefix}_STATUS_PATH", "/images/generations/{task_id}") or "/images/generations/{task_id}",
+        result_path=env_value(f"{prefix}_RESULT_PATH", "/images/generations/{task_id}") or "/images/generations/{task_id}",
+        timeout=env_value(f"{prefix}_TIMEOUT", "480") or "480",
+        query_timeout=env_value(f"{prefix}_QUERY_TIMEOUT", "30") or "30",
+        result_timeout=env_value(f"{prefix}_RESULT_TIMEOUT", "120") or "120",
+        download_timeout=env_value(f"{prefix}_DOWNLOAD_TIMEOUT", "120") or "120",
+    )
+
+
+def _configured_image_client(provider: str) -> Any | None:
+    try:
+        from api_server import _image_client_for_provider
+    except ImportError:
+        return _env_image_client(provider)
+    client = _image_client_for_provider(provider)
+    if client is not None:
+        return client
+    return _env_image_client(provider)
+
+
+
 def generate_image(
     request: Mapping[str, Any] | str,
     *,
@@ -68,24 +101,16 @@ def generate_image(
         candidate_provider = request.get("provider")
         if isinstance(candidate_provider, str) and candidate_provider.strip():
             selected_provider = candidate_provider
-    selected_provider = (selected_provider or workflow["provider"]).strip().lower()
-    if generation_client is None and selected_provider in {"hermes", "hermes_volcano", "liblib"}:
-        prefix = "HERMES" if selected_provider == "hermes" else "HERMES_VOLCANO"
-        default_api_url = "https://aiapi.yicheng.bj.cn/v1" if prefix == "HERMES" else "https://ark.cn-beijing.volces.com/api/v3"
-        default_model = "gpt-image-2" if prefix == "HERMES" else "doubao-seedream-5-0-pro-260628"
-        generation_client = HermesClient(
-            api_url=env_value(f"{prefix}_API_URL", default_api_url) or default_api_url,
-            api_key=env_value(f"{prefix}_API_KEY", "") or "",
-            model=env_value(f"{prefix}_MODEL", default_model) or default_model,
-            submit_path=env_value(f"{prefix}_SUBMIT_PATH", "/images/generations") or "/images/generations",
-            edit_path=env_value(f"{prefix}_EDIT_PATH", "/images/edits") or "/images/edits",
-            status_path=env_value(f"{prefix}_STATUS_PATH", "/images/generations/{task_id}") or "/images/generations/{task_id}",
-            result_path=env_value(f"{prefix}_RESULT_PATH", "/images/generations/{task_id}") or "/images/generations/{task_id}",
-            timeout=env_value(f"{prefix}_TIMEOUT", "480") or "480",
-            query_timeout=env_value(f"{prefix}_QUERY_TIMEOUT", "30") or "30",
-            result_timeout=env_value(f"{prefix}_RESULT_TIMEOUT", "120") or "120",
-            download_timeout=env_value(f"{prefix}_DOWNLOAD_TIMEOUT", "120") or "120",
-        )
+    if not selected_provider:
+        try:
+            from api_server import _default_image_provider
+
+            selected_provider = _default_image_provider()
+        except (ImportError, LookupError):
+            selected_provider = workflow["provider"]
+    selected_provider = selected_provider.strip().lower()
+    if generation_client is None:
+        generation_client = _configured_image_client(selected_provider)
     return _generate_image(
         prompt,
         client=generation_client,

@@ -121,10 +121,13 @@ class ApiServerTests(unittest.TestCase):
         self._module_specs_snapshot = {module_id: dict(spec) for module_id, spec in api_server.MODULE_SPECS.items()}
         self._module_option_keys_snapshot = {module_id: set(keys) for module_id, keys in api_server.MODULE_OPTION_KEYS.items()}
         self._environ_snapshot = dict(os.environ)
+        for key in ("HERMES_API_KEY", "HERMES_VOLCANO_API_KEY"):
+            os.environ.pop(key, None)
         api_server.JOBS.clear()
         api_server.R2_UPLOADS.clear()
         api_server.BATCHES.clear()
         api_server.MIXES.clear()
+
 
     def tearDown(self) -> None:
         for module_id in list(api_server.MODULE_SPECS):
@@ -158,6 +161,18 @@ class ApiServerTests(unittest.TestCase):
             bucket_name="test-bucket",
             public_base_url="https://img.example.com",
         )
+
+    @staticmethod
+    def only_providers(*names: str):
+        allowed = {name.lower() for name in names}
+
+        def _available(name: str) -> tuple[bool, str | None]:
+            if str(name).strip().lower() in allowed:
+                return True, None
+            return False, "未完成本地 API Key 配置"
+
+        return _available
+
 
     def test_health_hides_configuration(self) -> None:
         response = self.client.get("/api/health")
@@ -347,9 +362,13 @@ class ApiServerTests(unittest.TestCase):
                 self.assertEqual(payload.provider, "hermes_volcano" if provider == "liblib" else provider)
 
     def test_shapewear_product_image_selects_and_defaults_provider(self) -> None:
-        payload = api_server.GenerationRequest(mode="shapewear_image", request={})
+        with patch("api_server._provider_available", side_effect=self.only_providers("hermes", "hermes_volcano")):
+            payload = api_server.GenerationRequest(mode="shapewear_image", request={})
         self.assertEqual(payload.provider, "hermes")
         self.assertEqual(api_server._provider_for_job(payload), "hermes")
+        with patch("api_server._provider_available", side_effect=self.only_providers("hermes_volcano")):
+            volcano_default = api_server.GenerationRequest(mode="shapewear_image", request={})
+        self.assertEqual(volcano_default.provider, "hermes_volcano")
         selected = api_server.GenerationRequest(mode="shapewear_image", provider="hermes_volcano", request={})
         self.assertEqual(selected.provider, "hermes_volcano")
         self.assertEqual(api_server._provider_for_job(selected), "hermes_volcano")
@@ -885,6 +904,42 @@ class ApiServerTests(unittest.TestCase):
         job_id = response.json()["job_id"]
         self.assertEqual(api_server.JOBS[job_id].payload.provider, "image.backup")
         submit.assert_called_once()
+
+    def test_default_image_provider_prefers_configured_custom_module(self) -> None:
+        created = self.client.post(
+            "/api/settings/modules",
+            json={
+                "name": "备用图片网关",
+                "category": "image",
+                "protocol": "image.hermes",
+                "slug": "backup",
+                "api_url": "https://8.8.8.8/v1",
+                "api_key": "custom-secret",
+                "model": "custom-image",
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        with patch("api_server._provider_available", side_effect=self.only_providers("image.backup", "hermes", "hermes_volcano")):
+            self.assertEqual(api_server._default_image_provider(), "image.backup")
+            payload = api_server.GenerationRequest(mode="image", request={"prompt": "studio product photo"})
+        self.assertEqual(payload.provider, "image.backup")
+        providers = self.client.get("/api/providers").json()["providers"]
+        image_ids = [item["id"] for item in providers if "image" in item.get("media_types", [])]
+        self.assertEqual(image_ids[0], "image.backup")
+
+    @patch("api_server.generate_image")
+    def test_image_job_fails_when_quality_check_does_not_pass(self, generate_image) -> None:
+        generate_image.return_value = str(self.images / "missing.png")
+        payload = api_server.GenerationRequest(mode="image", request={"prompt": "studio product photo"})
+        job = api_server.GenerationJob(id="quality-fail", payload=payload)
+        api_server.JOBS[job.id] = job
+        with patch.object(api_server, "_image_client_for_provider", return_value=object()):
+            api_server._run_job(job.id)
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.error["code"], "validation_error")
+        self.assertFalse(job.error["retryable"])
+        self.assertIn("技术检查未通过", job.error["message"])
+
 
     def test_custom_module_survives_in_memory_registry_reload(self) -> None:
         created = self.client.post(
@@ -1577,44 +1632,84 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         submit.assert_called_once()
 
-    def test_clothing_image_to_image_defaults_to_hermes(self) -> None:
+    def test_clothing_image_to_image_defaults_to_first_configured_provider(self) -> None:
         garment = self.images / "garment.png"
         garment.write_bytes(b"garment")
-        payload = api_server.GenerationRequest(
-            mode="clothing_image_to_image",
-            request={"objective": "show fabric detail"},
-            reference_images=[api_server.ReferenceImage(kind="asset", value="images/garment.png")],
-        )
-        self.assertEqual(payload.provider, "hermes")
-        self.assertEqual(api_server._provider_for_job(payload), "hermes")
+        with patch("api_server._provider_available", side_effect=self.only_providers("hermes_volcano")):
+            payload = api_server.GenerationRequest(
+                mode="clothing_image_to_image",
+                request={"objective": "show fabric detail"},
+                reference_images=[api_server.ReferenceImage(kind="asset", value="images/garment.png")],
+            )
+        self.assertEqual(payload.provider, "hermes_volcano")
+        self.assertEqual(api_server._provider_for_job(payload), "hermes_volcano")
 
-    @patch("api_server._provider_available", return_value=(True, None))
     @patch("api_server.JOB_EXECUTOR.submit")
-    def test_clothing_api_request_without_provider_queues_hermes_job(self, submit, _available) -> None:
+    def test_clothing_api_request_without_provider_queues_configured_job(self, submit) -> None:
         garment = self.images / "garment.png"
         garment.write_bytes(b"garment")
-        response = self.client.post(
-            "/api/generations",
-            json={
-                "mode": "clothing_image_to_image",
-                "request": {"objective": "show fabric detail"},
-                "reference_images": [{"kind": "asset", "value": "images/garment.png"}],
-            },
-        )
+        with patch("api_server._provider_available", side_effect=self.only_providers("hermes_volcano")):
+            response = self.client.post(
+                "/api/generations",
+                json={
+                    "mode": "clothing_image_to_image",
+                    "request": {"objective": "show fabric detail"},
+                    "reference_images": [{"kind": "asset", "value": "images/garment.png"}],
+                },
+            )
         self.assertEqual(response.status_code, 202)
         job = api_server.JOBS[response.json()["job_id"]]
-        self.assertEqual(job.payload.provider, "hermes")
-        self.assertEqual(api_server._provider_for_job(job.payload), "hermes")
+        self.assertEqual(job.payload.provider, "hermes_volcano")
+        self.assertEqual(api_server._provider_for_job(job.payload), "hermes_volcano")
         submit.assert_called_once()
 
-    def test_clothing_image_to_image_rejects_non_hermes_provider(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Hermes"):
-            api_server.GenerationRequest(
-                mode="clothing_image_to_image",
-                provider="liblib",
-                request={"objective": "show fabric detail"},
-                reference_images=[api_server.ReferenceImage(kind="url", value="https://cdn.example.com/garment.png")],
+    def test_clothing_image_to_image_accepts_volcano_alias(self) -> None:
+        payload = api_server.GenerationRequest(
+            mode="clothing_image_to_image",
+            provider="liblib",
+            request={"objective": "show fabric detail"},
+            reference_images=[api_server.ReferenceImage(kind="url", value="https://cdn.example.com/garment.png")],
+        )
+        self.assertEqual(payload.provider, "hermes_volcano")
+
+    def test_explicit_unavailable_image_provider_returns_503(self) -> None:
+        garment = self.images / "garment.png"
+        garment.write_bytes(b"garment")
+        with patch("api_server._provider_available", side_effect=self.only_providers("hermes_volcano")):
+            response = self.client.post(
+                "/api/generations",
+                json={
+                    "mode": "clothing_image_to_image",
+                    "provider": "hermes",
+                    "request": {"objective": "show fabric detail"},
+                    "reference_images": [{"kind": "asset", "value": "images/garment.png"}],
+                },
             )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["code"], "provider_unavailable")
+
+    def test_batch_without_provider_uses_first_configured_image_provider(self) -> None:
+        with patch("api_server._provider_available", side_effect=self.only_providers("hermes_volcano")), patch(
+            "api_server.BATCH_EXECUTOR.submit"
+        ):
+            response = self.client.post(
+                "/api/generation-batches",
+                json={"items": [{"client_id": "row-1", "prompt": "studio image"}]},
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(api_server.BATCHES[response.json()["batch_id"]]["provider"], "hermes_volcano")
+
+    def test_batch_explicit_unavailable_provider_returns_503(self) -> None:
+        with patch("api_server._provider_available", side_effect=self.only_providers("hermes_volcano")):
+            response = self.client.post(
+                "/api/generation-batches",
+                json={"provider": "hermes", "items": [{"client_id": "row-1", "prompt": "studio image"}]},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["code"], "provider_unavailable")
+
+
+
 
     def test_clothing_image_to_image_rejects_zero_or_multiple_references(self) -> None:
         for references in ([], [{"kind": "url", "value": "https://cdn.example.com/a.png"}, {"kind": "url", "value": "https://cdn.example.com/b.png"}]):

@@ -177,8 +177,12 @@ cd web
 npm run build
 ```
 
-Provider smoke tests that make real network calls are intentionally separate;
-review their source and configure credentials before enabling them.
+Image workflows keep Hermes as the default label, but auto-select the first
+configured image Provider. An explicit unavailable choice returns HTTP 503
+instead of silently remapping. Provider smoke tests that make real network
+calls are intentionally separate; review their source and configure credentials
+before enabling them.
+
 
 ## Repository layout
 

@@ -293,6 +293,89 @@ def _is_video_provider(name: str) -> bool:
     spec = MODULE_SPECS.get(module_id or "")
     return bool(spec and spec.get("category") == "video")
 
+_PREFERRED_IMAGE_PROVIDERS = ("hermes", "hermes_volcano")
+_BUILTIN_IMAGE_PROVIDER_SET = frozenset(_PREFERRED_IMAGE_PROVIDERS)
+
+
+def _canonical_image_provider(name: str | None) -> str | None:
+    if not isinstance(name, str) or not name.strip():
+        return None
+    normalized = name.strip().lower()
+    if normalized == "liblib":
+        return "hermes_volcano"
+    if not _is_image_provider(normalized):
+        return None
+    return normalized
+
+
+def _available_image_providers(*, builtin_only: bool = False) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _append(provider: str) -> None:
+        if provider in seen:
+            return
+        try:
+            available, _ = _provider_available(provider)
+        except KeyError:
+            return
+        if available:
+            ordered.append(provider)
+            seen.add(provider)
+
+    if not builtin_only:
+        for module_id, spec in MODULE_SPECS.items():
+            if spec.get("category") != "image" or spec.get("kind") != "custom":
+                continue
+            _append(_public_provider_id(module_id))
+    for provider in _PREFERRED_IMAGE_PROVIDERS:
+        _append(provider)
+    if builtin_only:
+        return ordered
+    for module_id, spec in MODULE_SPECS.items():
+        if spec.get("category") != "image":
+            continue
+        _append(_public_provider_id(module_id))
+    return ordered
+
+
+def _default_image_provider(*, builtin_only: bool = False, allow_unconfigured: bool = True) -> str:
+    available = _available_image_providers(builtin_only=builtin_only)
+    if available:
+        return available[0]
+    if allow_unconfigured:
+        return "hermes"
+    raise LookupError("未配置可用的图片 Provider")
+
+
+def _resolve_image_provider(
+    name: str | None,
+    *,
+    allowed: set[str] | frozenset[str] | None = None,
+    builtin_only: bool = False,
+) -> str:
+    raw = name.strip().lower() if isinstance(name, str) and name.strip() else None
+    requested = _canonical_image_provider(raw)
+    if raw and requested is None:
+        raise ValueError("图片模式仅支持图片 Provider")
+    if requested and allowed is not None and requested not in allowed:
+        raise ValueError("所选图片 Provider 不受当前工作流支持")
+    if requested:
+        return requested
+    candidates = _available_image_providers(builtin_only=builtin_only)
+    if allowed is not None:
+        candidates = [provider for provider in candidates if provider in allowed]
+    if candidates:
+        return candidates[0]
+    if allowed is not None:
+        for provider in _PREFERRED_IMAGE_PROVIDERS:
+            if provider in allowed:
+                return provider
+    return "hermes"
+
+
+
+
 
 def _custom_module_id(category: str, slug: str) -> str:
     normalized_slug = slug.strip().lower()
@@ -418,31 +501,10 @@ class GenerationRequest(BaseModel):
     def validate_contract(self) -> "GenerationRequest":
         if isinstance(self.provider, str):
             self.provider = self.provider.strip().lower() or None
-        if self.mode == "clothing_image_to_image":
-            if self.provider not in {None, "hermes"}:
-                raise ValueError("clothing image-to-image requires the Hermes provider")
-            self.provider = "hermes"
-        if self.mode == "tiktok_clothing_image" and self.provider == "liblib":
-            self.provider = "hermes_volcano"
-        if self.mode == "tiktok_clothing_image" and self.provider not in {None, "hermes", "hermes_volcano"}:
-            raise ValueError("TikTok clothing images support Hermes and Hermes Volcano providers")
-        if self.mode == "shapewear_image" and self.provider is None:
-            self.provider = "hermes"
-        if self.mode == "shapewear_image" and self.provider == "liblib":
-            # Keep the old public alias accepted while persisting the current
-            # canonical name used by the second Hermes/Volcano module.
-            self.provider = "hermes_volcano"
-        if self.mode == "shapewear_image" and self.provider not in {None, "hermes", "hermes_volcano"}:
-            raise ValueError("shapewear product images require the Hermes or Hermes Volcano image provider")
         if self.mode in {"image", "poster"}:
-            if self.provider is None:
-                self.provider = "hermes"
-            elif self.provider == "liblib":
-                self.provider = "hermes_volcano"
-            elif not _is_image_provider(self.provider):
-                raise ValueError("图片模式仅支持图片 Provider")
-        if self.mode == "tiktok_clothing_image" and self.provider is None:
-            self.provider = "hermes"
+            self.provider = _resolve_image_provider(self.provider)
+        elif self.mode in {"clothing_image_to_image", "tiktok_clothing_image", "shapewear_image", "model_outfit_swap"}:
+            self.provider = _resolve_image_provider(self.provider, allowed=_BUILTIN_IMAGE_PROVIDER_SET, builtin_only=True)
         if self.mode in {"video", "shapewear_video", "tiktok_10s"}:
             if self.provider is None:
                 self.provider = "veo"
@@ -451,11 +513,6 @@ class GenerationRequest(BaseModel):
         if self.reference_image and self.mode in _REFERENCE_IMAGE_MODES:
             raise ValueError("single reference_image is only supported for video modes")
         if self.mode == "model_outfit_swap":
-            if self.provider == "liblib":
-                self.provider = "hermes_volcano"
-            if self.provider not in {None, "hermes", "hermes_volcano"}:
-                raise ValueError("model outfit swap supports Hermes and Hermes Volcano providers")
-            self.provider = self.provider or "hermes"
             if len(self.reference_images) < 2:
                 raise ValueError("model outfit swap requires a model image and at least one outfit image")
             if len(self.reference_images) > MAX_OUTFIT_REFERENCE_IMAGES:
@@ -465,6 +522,7 @@ class GenerationRequest(BaseModel):
             # The outfit workflow has no user-authored generation brief. Drop
             # any legacy fields before the request is persisted or queued.
             self.request = {}
+
         if self.reference_images:
             if self.mode not in _REFERENCE_IMAGE_MODES:
                 raise ValueError("reference_images are only supported for image modes")
@@ -653,6 +711,8 @@ class BatchRequest(BaseModel):
     items: list[BatchItem] = Field(min_length=1, max_length=100)
     options: BatchOptions = Field(default_factory=BatchOptions)
     idempotency_key: str | None = Field(default=None, max_length=128)
+    provider: str | None = Field(default=None, max_length=64)
+
 
 
 class MixClip(BaseModel):
@@ -757,13 +817,10 @@ def _now() -> str:
 
 
 def _provider_for_job(payload: GenerationRequest) -> str:
-    if payload.mode == "clothing_image_to_image":
-        return "hermes"
     if payload.mode in {"image", "model_outfit_swap", "clothing_image_to_image", "tiktok_clothing_image", "shapewear_image", "poster"}:
-        # ``liblib`` remains an input-compatible alias for the second Hermes
-        # slot so previously queued requests do not select the old client.
-        return "hermes_volcano" if payload.provider == "liblib" else (payload.provider or "hermes")
+        return payload.provider or _default_image_provider(builtin_only=payload.mode not in {"image", "poster"})
     return payload.provider or "veo"
+
 
 
 _IMAGE_PROVIDER_FALLBACKS = {"hermes": "hermes_volcano", "hermes_volcano": "hermes"}
@@ -1236,6 +1293,8 @@ def _run_job(job_id: str) -> None:
             job.outputs = list(manifest["outputs"])
             job.quality = dict(manifest["quality"])
         _set_job(job, "quality_check", "正在完成技术检查")
+        if not isinstance(job.quality, dict) or job.quality.get("passed") is not True:
+            raise ValueError("技术检查未通过，任务不能标记为成功")
         _set_job(job, "succeeded", "生成完成")
     except Exception as error:  # Provider implementations normalize the detail we can safely expose.
         if isinstance(error, (HermesRequestError, VideoProviderRequestError)):
@@ -1872,7 +1931,8 @@ def _hermes_client() -> HermesClient:
 
 
 def _image_client_for_provider(provider: str | None) -> Any | None:
-    normalized = (provider or "hermes").strip().lower()
+    normalized = (provider or _default_image_provider()).strip().lower()
+
     if normalized == "hermes":
         return _hermes_client()
     if normalized in {"hermes_volcano", "liblib"}:
@@ -2076,11 +2136,20 @@ def _run_batch_item(batch_id: str, item_index: int) -> None:
     try:
         source = resolve_asset(item["image_asset_id"]) if item.get("image_asset_id") else None
         references = [resolve_asset(identifier) for identifier in item.get("reference_asset_ids", [])]
+        with BATCHES_LOCK:
+            provider = BATCHES[batch_id].get("provider") or _default_image_provider(allow_unconfigured=False)
         output = generate_image(
-            {"prompt": item["prompt"]}, client=_hermes_client(), provider="hermes", image=source, references=references,
-            aspect_ratio=item.get("aspect_ratio", "square"), output_dir=OUTPUTS_DIR / "images",
-            poll_interval=1, max_polls=120,
+            {"prompt": item["prompt"]},
+            client=_image_client_for_provider(provider),
+            provider=provider,
+            image=source,
+            references=references,
+            aspect_ratio=item.get("aspect_ratio", "square"),
+            output_dir=OUTPUTS_DIR / "images",
+            poll_interval=1,
+            max_polls=120,
         )
+
         update = {"status": "succeeded", "output": asset_url(output)}
     except Exception as error:
         _, message, _ = _safe_message(error)
@@ -2445,18 +2514,25 @@ def providers() -> dict[str, Any]:
     _stored_module_records()
     listed: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for module_id in ("image.hermes", "image.liblib", "video.veo", "video.seedance"):
+
+    def _append(module_id: str) -> None:
+        if module_id not in MODULE_SPECS:
+            return
         record = _public_provider_record(module_id)
+        if record["id"] in seen:
+            return
         listed.append(record)
         seen.add(record["id"])
+
+    for module_id, spec in MODULE_SPECS.items():
+        if spec.get("category") == "image" and spec.get("kind") == "custom":
+            _append(module_id)
+    for module_id in ("image.hermes", "image.liblib", "video.veo", "video.seedance"):
+        _append(module_id)
     for module_id, spec in MODULE_SPECS.items():
         if spec.get("category") not in {"image", "video"}:
             continue
-        record = _public_provider_record(module_id)
-        if record["id"] in seen:
-            continue
-        listed.append(record)
-        seen.add(record["id"])
+        _append(module_id)
     return {"providers": listed}
 
 
@@ -2654,7 +2730,13 @@ def delete_custom_module(module_id: str) -> Response:
 
 @app.post("/api/generation-batches", status_code=202)
 def create_batch(request: BatchRequest) -> dict[str, Any]:
-    available, reason = _provider_available("hermes")
+    try:
+        provider = _resolve_image_provider(request.provider)
+        available, reason = _provider_available(provider)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail={"code": "invalid_provider", "message": str(error)}) from error
+    except KeyError as error:
+        raise HTTPException(status_code=400, detail={"code": "unknown_provider", "message": "未知图片 Provider"}) from error
     if not available:
         raise HTTPException(status_code=503, detail={"code": "provider_unavailable", "message": reason})
     try:
@@ -2668,10 +2750,12 @@ def create_batch(request: BatchRequest) -> dict[str, Any]:
     batch_id = uuid.uuid4().hex
     batch = {
         "id": batch_id, "status": "queued", "idempotency_key": request.idempotency_key,
+        "provider": provider,
         "max_concurrency": request.options.max_concurrency,
         "items": [item.model_dump() | {"status": "queued"} for item in request.items],
         "created_at": _now(), "updated_at": _now(),
     }
+
     with BATCHES_LOCK:
         if request.idempotency_key:
             existing = next((stored for stored in BATCHES.values() if stored.get("idempotency_key") == request.idempotency_key), None)

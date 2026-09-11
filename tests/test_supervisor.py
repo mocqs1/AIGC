@@ -47,6 +47,52 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(len(result["actions"]), 1)
         self.assertEqual(result["actions"][0]["result"], "submitted")
         self.assertIn("Supervisor recovery nonce", run.call_args_list[1].args[0][-1])
+
+    @patch("harness.supervisor.subprocess.run")
+    def test_idle_active_run_stops_after_two_recovery_prompts(self, run):
+        self.write_run(supervisor_prompt_count=2)
+        snapshot = {"result": {"snapshot": {"agents": [{"name": "aigc-build-codex", "cwd": str(self.root), "agent_status": "idle", "pane_id": "w1:p2", "revision": 4}]}}}
+        run.return_value = type("Result", (), {"returncode": 0, "stdout": json.dumps(snapshot)})()
+        result = self.supervisor.reconcile()
+        self.assertEqual(result["actions"][0]["result"], "exhausted")
+        self.assertEqual(run.call_count, 1)
+        saved = json.loads(next(self.anti_loop.glob("*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(saved["last_supervisor_result"], "exhausted")
+
+    @patch("harness.supervisor.subprocess.run")
+    def test_recovery_prompt_count_resets_after_progress(self, run):
+        self.write_run(
+            supervisor_prompt_count=2,
+            last_supervisor_action_at="2000-01-01T00:00:00+00:00",
+            last_progress={"at": "2000-01-02T00:00:00+00:00", "kind": "artifact"},
+        )
+        snapshot = {"result": {"snapshot": {"agents": [{"name": "aigc-build-codex", "cwd": str(self.root), "agent_status": "idle", "pane_id": "w1:p2", "revision": 4}]}}}
+        run.side_effect = [
+            type("Result", (), {"returncode": 0, "stdout": json.dumps(snapshot)})(),
+            type("Result", (), {"returncode": 0, "stdout": "{}"})(),
+        ]
+        result = self.supervisor.reconcile()
+        self.assertEqual(result["actions"][0]["result"], "submitted")
+        saved = json.loads(next(self.anti_loop.glob("*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(saved["supervisor_prompt_count"], 1)
+
+    @patch("harness.supervisor.subprocess.run")
+    def test_status_reads_last_reconcile_report(self, run):
+        run.return_value.returncode = 0
+        run.return_value.stdout = json.dumps({"result": {"snapshot": {"agents": []}}})
+        report = self.supervisor.reconcile()
+        self.assertEqual(self.supervisor.status()["generated_at"], report["generated_at"])
+
+    @patch("harness.supervisor.subprocess.run")
+    def test_progress_quiet_uses_last_progress_at_field(self, run):
+        self.write_run(
+            last_progress={"at": "2000-01-01T00:00:00+00:00", "kind": "artifact"},
+            last_progress_at="2099-01-01T00:00:00+00:00",
+        )
+        snapshot = {"result": {"snapshot": {"agents": [{"name": "aigc-build-codex", "cwd": str(self.root), "agent_status": "working", "pane_id": "w1:p2", "revision": 9}]}}}
+        run.return_value = type("Result", (), {"returncode": 0, "stdout": json.dumps(snapshot)})()
+        result = self.supervisor.reconcile()
+        self.assertEqual(result["findings"][0]["code"], "progress_quiet")
     @patch("harness.supervisor.subprocess.run")
     def test_unknown_labeled_pane_is_restarted_without_close(self, run):
         snapshot = {"result": {"snapshot": {"agents": [{"label": "AIGC Build Codex", "agent_status": "unknown", "cwd": str(self.root), "pane_id": "w1:p2"}]}}}

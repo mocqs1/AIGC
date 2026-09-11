@@ -80,7 +80,24 @@ class ClothingImageToImageTests(unittest.TestCase):
         self.assertNotIn("reference_image_urls", payload)
         self.assertEqual(manifest["provider"], "hermes")
 
-    def test_non_hermes_provider_is_rejected_before_generation(self):
+    def test_hermes_volcano_and_liblib_alias_are_accepted(self):
+        client = FakeClient()
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "garment.png"
+            source.write_bytes(b"garment")
+            for provider, expected in (("hermes_volcano", "hermes_volcano"), ("liblib", "hermes_volcano")):
+                with self.subTest(provider=provider):
+                    client.submitted.clear()
+                    manifest = generate_image(
+                        {"objective": "show fabric detail"},
+                        garment_image=str(source),
+                        provider=provider,
+                        client=client,
+                        output_dir=temporary,
+                    )
+                    self.assertEqual(manifest["provider"], expected)
+
+    def test_non_image_provider_is_rejected_before_generation(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "garment.png"
             source.write_bytes(b"garment")
@@ -88,10 +105,11 @@ class ClothingImageToImageTests(unittest.TestCase):
                 generate_image(
                     {"objective": "show fabric detail"},
                     garment_image=str(source),
-                    provider="liblib",
+                    provider="veo",
                     client=FakeClient(),
                     output_dir=temporary,
                 )
+
 
     def test_reference_images_must_contain_one_image(self):
         for references in ([], ["a.png", "b.png"], ["a.mp4"]):

@@ -237,8 +237,11 @@ def generate_image(
     if references:
         raise PosterRequestError("poster accepts at most one reference image")
     selected_provider = (provider or (request.get("provider") if isinstance(request, Mapping) else None) or "hermes").strip().lower()
-    if selected_provider not in {"liblib", "hermes"}:
-        raise PosterRequestError("poster requires the Liblib or Hermes image provider")
+    if selected_provider == "liblib":
+        selected_provider = "hermes_volcano"
+    if selected_provider not in {"hermes", "hermes_volcano"}:
+        raise PosterRequestError("poster requires the Hermes or Hermes Volcano image provider")
+
     body = dict(request) if isinstance(request, Mapping) else {"subject": request}
     if image:
         body["_reference_attached"] = True

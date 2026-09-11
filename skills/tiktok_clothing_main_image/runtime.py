@@ -221,9 +221,18 @@ def _load_workflow() -> dict[str, Any]:
         workflow = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError(f"could not load TikTok clothing workflow: {path}") from error
-    if not isinstance(workflow, dict) or workflow.get("type") != "image" or workflow.get("provider") != TIKTOK_CLOTHING_PROVIDER:
-        raise RuntimeError("TikTok clothing workflow must be an Hermes image workflow")
+    if (
+        not isinstance(workflow, dict)
+        or workflow.get("type") != "image"
+        or workflow.get("provider") not in {"hermes", "hermes_volcano"}
+        or workflow.get("provider_locked") is True
+        or not isinstance(workflow.get("providers"), list)
+        or set(workflow.get("providers") or ()) != {"hermes", "hermes_volcano"}
+    ):
+        raise RuntimeError("TikTok clothing workflow must be a selectable Hermes image workflow")
     return workflow
+
+
 
 
 def generate_image(
@@ -238,12 +247,23 @@ def generate_image(
     """Generate one source-locked TikTok clothing image."""
     _load_workflow()
     body, _, purpose, style, requested_ratio, market, locale, presentation_mode = _normalise(request)
-    selected = product_images if product_images is not None else reference_images
-    refs = _references_from(body, selected)
+    product_refs = product_images if product_images is not None else reference_images
+    refs = _references_from(body, product_refs)
     provider_candidates = [options.pop("provider", None), body.get("provider")]
-    if any(candidate is not None and str(candidate).strip().lower() not in {"hermes", "hermes_volcano"} for candidate in provider_candidates):
-        raise TikTokClothingRequestError("TikTok clothing images require Hermes or Hermes Volcano")
-    provider = next((str(candidate).strip().lower() for candidate in provider_candidates if candidate is not None), TIKTOK_CLOTHING_PROVIDER)
+    selected_provider = None
+    for candidate in provider_candidates:
+        if candidate is None:
+            continue
+        normalized = str(candidate).strip().lower()
+        if normalized == "liblib":
+            normalized = "hermes_volcano"
+        if normalized not in {"hermes", "hermes_volcano"}:
+            raise TikTokClothingRequestError("TikTok clothing images require Hermes or Hermes Volcano")
+        selected_provider = normalized
+        break
+    provider = selected_provider or TIKTOK_CLOTHING_PROVIDER
+
+
     prompt = build_prompt(body)
     root = Path(output_dir) if output_dir is not None else OUTPUT_ROOT
     root.mkdir(parents=True, exist_ok=True)

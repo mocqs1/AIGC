@@ -112,16 +112,55 @@ class TikTokClothingMainImageTests(unittest.TestCase):
             manifest = generate_image({}, product_images=["https://cdn.example.com/master.png", "https://cdn.example.com/detail.webp"], client=client)
         self.assertEqual(manifest["source_count"], 2)
 
-    def test_api_contract_requires_master_and_defaults_to_hermes(self):
+    def test_hermes_volcano_and_liblib_alias_are_accepted(self):
+        client = FakeClient()
+        with tempfile.TemporaryDirectory() as temporary:
+            master = Path(temporary) / "master.png"
+            master.write_bytes(b"master")
+            for provider, expected in (("hermes_volcano", "hermes_volcano"), ("liblib", "hermes_volcano")):
+                with self.subTest(provider=provider):
+                    client.submitted.clear()
+                    manifest = generate_image(
+                        {"purpose": "shop_listing", "style": "studio_detail"},
+                        product_images=[str(master)],
+                        provider=provider,
+                        client=client,
+                        output_dir=temporary,
+                    )
+                    self.assertEqual(manifest["provider"], expected)
+
+    def test_non_image_provider_is_rejected_before_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            master = Path(temporary) / "master.png"
+            master.write_bytes(b"master")
+            with self.assertRaisesRegex(TikTokClothingRequestError, "Hermes"):
+                generate_image(
+                    {"purpose": "shop_listing", "style": "studio_detail"},
+                    product_images=[str(master)],
+                    provider="veo",
+                    client=FakeClient(),
+                    output_dir=temporary,
+                )
+
+    def test_api_contract_requires_master_and_defaults_to_configured_provider(self):
         import api_server
 
-        payload = api_server.GenerationRequest(
-            mode="tiktok_clothing_image",
-            request={"purpose": "shop_listing", "style": "studio_detail"},
-            reference_images=[api_server.ReferenceImage(kind="url", value="https://cdn.example.com/master.png")],
-        )
-        self.assertEqual(payload.provider, "hermes")
-        self.assertEqual(api_server._provider_for_job(payload), "hermes")
+        with patch(
+            "api_server._provider_available",
+            side_effect=lambda name: (
+                str(name).strip().lower() == "hermes_volcano",
+                None if str(name).strip().lower() == "hermes_volcano" else "未完成本地 API Key 配置",
+            ),
+        ):
+            payload = api_server.GenerationRequest(
+                mode="tiktok_clothing_image",
+                request={"purpose": "shop_listing", "style": "studio_detail"},
+                reference_images=[api_server.ReferenceImage(kind="url", value="https://cdn.example.com/master.png")],
+            )
+        self.assertEqual(payload.provider, "hermes_volcano")
+        self.assertEqual(api_server._provider_for_job(payload), "hermes_volcano")
+
+
         with self.assertRaisesRegex(ValueError, "one product master"):
             api_server.GenerationRequest(mode="tiktok_clothing_image", request={}, reference_images=[])
         with self.assertRaisesRegex(ValueError, "at most nine"):

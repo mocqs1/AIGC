@@ -1,8 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from main import generate_image, generate_video
+
 
 
 class FakeClient:
@@ -41,6 +43,32 @@ class MainEntryPointTests(unittest.TestCase):
         self.assertIn("clean neutral studio", client.submitted[0][0])
         self.assertNotIn("premium bedroom", client.submitted[0][0])
         self.assertIn("INTIMATE-APPAREL SAFETY LOCK", client.submitted[0][0])
+
+
+    def test_image_entry_uses_configured_module_client_when_client_is_none(self) -> None:
+        sentinel = object()
+        with tempfile.TemporaryDirectory() as output_dir:
+            destination = Path(output_dir) / "out.png"
+            with patch("main._configured_image_client", return_value=sentinel) as configured:
+                with patch("main._generate_image", return_value=str(destination)) as generate:
+                    with patch("main.load_workflow", return_value={"type": "image", "provider": "hermes"}):
+                        with patch("api_server._default_image_provider", return_value="image.backup"):
+                            generate_image({"prompt": "studio product photo", "type": "image"}, output_dir=output_dir)
+        configured.assert_called_once_with("image.backup")
+        self.assertIs(generate.call_args.kwargs["client"], sentinel)
+
+    def test_image_entry_forwards_custom_provider_to_module_client(self) -> None:
+        sentinel = object()
+        with tempfile.TemporaryDirectory() as output_dir:
+            destination = Path(output_dir) / "out.png"
+            with patch("main._configured_image_client", return_value=sentinel) as configured:
+                with patch("main._generate_image", return_value=str(destination)) as generate:
+                    generate_image(
+                        {"prompt": "studio product photo", "type": "image", "provider": "image.backup"},
+                        output_dir=output_dir,
+                    )
+        configured.assert_called_once_with("image.backup")
+        self.assertIs(generate.call_args.kwargs["client"], sentinel)
 
     def test_video_entry_supports_direct_prompt_and_reference_image(self):
         client = FakeClient(b"video")

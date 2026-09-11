@@ -75,8 +75,9 @@ unreadable crops, occluding hands or props, and visual effects that obscure
 construction. Do not make unsupported medical, body-shaping, performance, or
 certification claims from the image.
 
-This workflow is fixed to the Hermes image provider. Do not route it through
-Liblib or another provider.
+This workflow uses a configured image provider. Prefer Hermes when that slot
+has an API key; otherwise use Hermes Volcano. Do not invent a third routing
+path or call an upstream provider from the browser.
 
 ## Workflow
 
@@ -87,9 +88,10 @@ Liblib or another provider.
    or construction.
 3. Build the prompt with the immutable garment contract and a presentation
    direction emphasizing material and construction detail.
-4. Call `main.generate_image` with `provider="hermes"`,
-   `image=<garment reference>`, and no additional reference images. Never call
-   an upstream provider directly from the browser.
+4. Call `main.generate_image` with the selected `provider` (`hermes` or
+   `hermes_volcano`), `image=<garment reference>`, and no additional
+   reference images. Never call an upstream provider directly from the browser.
+
 5. Save the generated artifact and final `prompt.txt` under
    `outputs/clothing_image/` when the host can write files.
 6. Return a manifest and mark semantic garment fidelity for visual manual
@@ -103,7 +105,8 @@ Liblib or another provider.
   "skill": "clothing-image-to-image",
   "workflow": "clothing_image_to_image",
   "type": "image",
-  "provider": "hermes",
+  "provider": "hermes | hermes_volcano",
+
   "prompt": "...",
   "garment_reference": "images/garment.png",
   "outputs": ["outputs/clothing_image/image_task.png"],

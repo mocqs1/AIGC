@@ -24,7 +24,19 @@ TERMINAL_STATES = frozenset({"completed", "blocked", "failed"})
 ACTIVE_STATES = frozenset({"ready", "active", "waiting", "paused", "verifying"})
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 MAX_TRANSIENT_RETRIES = 3
-
+ROOT_TASK_ID = "TEAM-ROOT"
+ROOT_OWNER = "aigc-lead-codex"
+ROOT_OBJECTIVE = "Keep the four-agent team on one bounded user request until named subtasks are terminal or paused."
+ROOT_ACCEPTANCE = "Each handoff has one owner, a named anti-loop task, and either terminal evidence or a Lead escalation."
+ROOT_INPUTS = {"session": "aigc-core", "topology": "lead-build-product-quality"}
+ROOT_BUDGET = {
+    "max_actions": 60,
+    "max_tool_calls": 40,
+    "max_model_turns": 16,
+    "max_no_progress": 2,
+    "max_delegations": 3,
+    "max_review_rounds": 2,
+}
 
 class GuardError(RuntimeError):
     """Stable failure returned by the anti-loop control plane."""
@@ -80,8 +92,11 @@ def _parse_time(value: Any, field: str = "deadline_at") -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _retry_delay_seconds(retry_count: int) -> int:
-    return min(30, 2 ** max(1, retry_count))
+def _retry_delay_seconds(retry_count: int, key: str = "") -> float:
+    base = min(30, 2 ** max(1, retry_count))
+    digest = hashlib.sha256(f"{key}:{retry_count}".encode("utf-8")).digest()
+    jitter_ratio = int.from_bytes(digest[:2], "big") / 65535 * 0.20
+    return base * (1 + jitter_ratio)
 
 
 def _budget(value: Mapping[str, Any] | None) -> dict[str, int]:
@@ -253,6 +268,95 @@ class AntiLoopGuard:
         self.store.save(run)
         return run
 
+    def ensure(
+        self,
+        task_id: str,
+        workspace_id: str,
+        owner: str,
+        objective: str,
+        acceptance: str,
+        inputs: Mapping[str, Any] | None = None,
+        budget: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        existing = self.store.load(_safe_id(task_id, "task_id"))
+        if existing is not None:
+            return existing
+        return self.start(task_id, workspace_id, owner, objective, acceptance, inputs, budget)
+
+    def bootstrap(self, workspace_id: str, owner: str = ROOT_OWNER) -> dict[str, Any]:
+        return self.ensure(
+            ROOT_TASK_ID,
+            workspace_id,
+            owner,
+            ROOT_OBJECTIVE,
+            ROOT_ACCEPTANCE,
+            ROOT_INPUTS,
+            ROOT_BUDGET,
+        )
+
+    def sync_coordination(
+        self,
+        workspace_id: str,
+        tasks: Iterable[Mapping[str, Any]] | None = None,
+        tasks_file: str | Path | None = None,
+    ) -> dict[str, Any]:
+        workspace_id = _safe_id(workspace_id, "workspace_id")
+        root = self.bootstrap(workspace_id)
+        document_tasks: list[Any] = list(tasks or [])
+        if tasks_file is not None:
+            path = Path(tasks_file)
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                raw = {"tasks": []}
+            except (OSError, json.JSONDecodeError) as error:
+                raise GuardError("invalid_json", "coordination tasks file is invalid") from error
+            if not isinstance(raw, Mapping) or not isinstance(raw.get("tasks"), list):
+                raise GuardError("invalid_json", "coordination tasks file is invalid")
+            document_tasks = list(raw["tasks"])
+        mirrored: list[dict[str, str]] = []
+        skipped: list[dict[str, str]] = []
+        for task in document_tasks:
+            if not isinstance(task, Mapping):
+                raise GuardError("invalid_json", "coordination task must be an object")
+            task_id = _safe_id(str(task.get("id") or ""), "task_id")
+            owner = _safe_id(str(task.get("owner") or ""), "owner")
+            status = str(task.get("status") or "")
+            criteria = task.get("acceptanceCriteria") if isinstance(task.get("acceptanceCriteria"), list) else []
+            acceptance_parts = [item.strip() for item in criteria if isinstance(item, str) and item.strip()]
+            acceptance = "; ".join(acceptance_parts) or f"Coordination task {task_id} reaches a terminal HERDR state"
+            paths = task.get("allowedPaths") if isinstance(task.get("allowedPaths"), list) else []
+            allowed = [item for item in paths if isinstance(item, str)][:16]
+            if task_id == ROOT_TASK_ID:
+                try:
+                    if status == "accepted":
+                        root = self.complete(task_id, {"coordination_status": status})
+                    elif status in {"failed", "cancelled"}:
+                        root = self.fail(task_id, f"coordination {status}", {"coordination_status": status})
+                except GuardError as error:
+                    skipped.append({"task_id": task_id, "action": status, "code": error.code, "message": error.message})
+                mirrored.append({"task_id": root["task_id"], "state": root["state"]})
+                continue
+            run = self.ensure(
+                task_id,
+                workspace_id,
+                owner,
+                f"Execute coordination task {task_id}",
+                acceptance[:512],
+                {"coordination": True, "allowed_paths": allowed},
+            )
+            try:
+                if status == "accepted":
+                    run = self.complete(task_id, {"coordination_status": status})
+                elif status in {"failed", "cancelled"}:
+                    run = self.fail(task_id, f"coordination {status}", {"coordination_status": status})
+            except GuardError as error:
+                skipped.append({"task_id": task_id, "action": status, "code": error.code, "message": error.message})
+                mirrored.append({"task_id": task_id, "state": run["state"]})
+                continue
+            mirrored.append({"task_id": run["task_id"], "state": run["state"]})
+        return {"root": {"task_id": root["task_id"], "state": root["state"]}, "mirrored": mirrored, "skipped": skipped}
+
     @staticmethod
     def _attempt_key(action_type: str, target: str, normalized_input: Mapping[str, Any]) -> str:
         return _digest({"action_type": action_type, "target": target, "input": dict(normalized_input)})
@@ -366,9 +470,13 @@ class AntiLoopGuard:
             latest = matching[-1]
             if latest["status"] == "started":
                 raise GuardError("duplicate_inflight", "an identical action is already admitted")
-            if latest["outcome"] not in {"transient", "unknown"}:
+            if latest["outcome"] == "unknown":
+                self._pause(run, "unknown_unresolved", "Reclassify the unknown outcome with new evidence or a Lead decision")
+                self.store.save(run)
+                raise GuardError("unknown_unresolved", "unknown outcome allows only one diagnostic; run is paused")
+            if latest["outcome"] != "transient":
                 raise GuardError("duplicate_action", "identical action already has a non-retryable outcome")
-            retry_count = sum(attempt.get("outcome") in {"transient", "unknown"} for attempt in matching)
+            retry_count = sum(1 for attempt in matching if attempt.get("outcome") == "transient")
             if retry_count >= MAX_TRANSIENT_RETRIES:
                 self._pause(run, "retry_exhausted", "Provide changed input, a new hypothesis, or an external decision")
                 self.store.save(run)
@@ -378,7 +486,7 @@ class AntiLoopGuard:
             if retry_count >= 2:
                 finished_at = _parse_time(latest.get("finished_at"), "finished_at")
                 if finished_at is not None:
-                    due = finished_at + timedelta(seconds=_retry_delay_seconds(retry_count))
+                    due = finished_at + timedelta(seconds=_retry_delay_seconds(retry_count, str(latest.get("key") or "")))
                     if self._now_dt() < due:
                         raise GuardError("backoff_pending", f"retry is not due until {due.isoformat()}")
         attempt = {
@@ -437,8 +545,10 @@ class AntiLoopGuard:
             }
         )
         if progress:
+            stamp = self._stamp()
             run["counters"]["consecutive_no_progress"] = 0
-            run["last_progress"] = {"at": self._stamp(), "kind": attempt["expected_progress"], "evidence_hash": evidence_hash}
+            run["last_progress"] = {"at": stamp, "kind": attempt["expected_progress"], "evidence_hash": evidence_hash}
+            run["last_progress_at"] = stamp
         else:
             run["counters"]["consecutive_no_progress"] += 1
         if outcome == "permission_or_policy":
@@ -529,6 +639,7 @@ class AntiLoopGuard:
         run["state"] = "ready"
         run["blocker"] = None
         run["wait"] = None
+        run["counters"]["consecutive_no_progress"] = 0
         run["resume"] = {"at": self._stamp(), "hypothesis": hypothesis}
         self.store.save(run)
         return run
@@ -612,6 +723,37 @@ class AntiLoopGuard:
         self.store.save(run)
         return run
 
+    def fail(self, task_id: str, reason: str, evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        run = self.store.load(_safe_id(task_id, "task_id"))
+        if run is None:
+            raise GuardError("unknown_task", "task does not exist")
+        if run["state"] == "failed":
+            return run
+        if run["state"] in TERMINAL_STATES:
+            raise GuardError("terminal_task", "task is already terminal")
+        reason = _safe_text(reason, "reason")
+        stamp = self._stamp()
+        for attempt in run["attempts"]:
+            if attempt.get("status") == "started":
+                attempt.update(
+                    {
+                        "status": "finished",
+                        "outcome": "environment",
+                        "progress": False,
+                        "finished_at": stamp,
+                    }
+                )
+        run["state"] = "failed"
+        run["wait"] = None
+        run["blocker"] = None
+        run["resolution"] = {
+            "at": stamp,
+            "reason": reason,
+            "evidence_hash": _digest(dict(evidence or {})) if evidence else None,
+        }
+        self.store.save(run)
+        return run
+
     def status(self, workspace_id: str | None = None) -> list[dict[str, Any]]:
         return self.store.runs(workspace_id)
 
@@ -652,6 +794,17 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--acceptance", required=True)
     start.add_argument("--inputs", default="{}")
     start.add_argument("--budget", default="{}")
+    ensure = sub.add_parser("ensure")
+    ensure.add_argument("--task-id", required=True)
+    ensure.add_argument("--workspace-id", required=True)
+    ensure.add_argument("--owner", required=True)
+    ensure.add_argument("--objective", required=True)
+    ensure.add_argument("--acceptance", required=True)
+    ensure.add_argument("--inputs", default="{}")
+    ensure.add_argument("--budget", default="{}")
+    bootstrap = sub.add_parser("bootstrap")
+    bootstrap.add_argument("--workspace-id", required=True)
+    bootstrap.add_argument("--owner", default=ROOT_OWNER)
     admit = sub.add_parser("admit")
     admit.add_argument("--task-id", required=True)
     admit.add_argument("--action-type", required=True)
@@ -678,6 +831,10 @@ def _parser() -> argparse.ArgumentParser:
     complete = sub.add_parser("complete")
     complete.add_argument("--task-id", required=True)
     complete.add_argument("--evidence", default="{}")
+    fail = sub.add_parser("fail")
+    fail.add_argument("--task-id", required=True)
+    fail.add_argument("--reason", required=True)
+    fail.add_argument("--evidence", default="{}")
     status = sub.add_parser("status")
     status.add_argument("--workspace-id")
     event = sub.add_parser("event")
@@ -685,6 +842,10 @@ def _parser() -> argparse.ArgumentParser:
     event.add_argument("--payload", required=True)
     sweep = sub.add_parser("sweep")
     sweep.add_argument("--workspace-id", required=True)
+    sync = sub.add_parser("sync")
+    sync.add_argument("--workspace-id", required=True)
+    sync.add_argument("--tasks-file")
+    sync.add_argument("--tasks", default="")
     return parser
 
 
@@ -694,6 +855,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "start":
             result = guard.start(args.task_id, args.workspace_id, args.owner, args.objective, args.acceptance, _json_arg(args.inputs), _json_arg(args.budget))
+        elif args.command == "ensure":
+            result = guard.ensure(args.task_id, args.workspace_id, args.owner, args.objective, args.acceptance, _json_arg(args.inputs), _json_arg(args.budget))
+        elif args.command == "bootstrap":
+            result = guard.bootstrap(args.workspace_id, args.owner)
         elif args.command == "admit":
             result = guard.admit(args.task_id, args.action_type, args.target, _json_arg(args.input), args.expected_progress, args.hypothesis)
         elif args.command == "finish":
@@ -706,10 +871,22 @@ def main(argv: list[str] | None = None) -> int:
             result = guard.resume(args.task_id, args.hypothesis, _json_arg(args.budget))
         elif args.command == "complete":
             result = guard.complete(args.task_id, _json_arg(args.evidence))
+        elif args.command == "fail":
+            result = guard.fail(args.task_id, args.reason, _json_arg(args.evidence))
         elif args.command == "status":
             result = guard.status(args.workspace_id)
         elif args.command == "event":
             result = guard.observe_herdr_event(args.workspace_id, _json_arg(args.payload))
+        elif args.command == "sweep":
+            result = {"cycles": guard.detect_cycles(args.workspace_id)}
+        elif args.command == "sync":
+            payload = None
+            if args.tasks:
+                parsed = _json_arg(args.tasks)
+                payload = parsed.get("tasks") if "tasks" in parsed else [parsed]
+                if not isinstance(payload, list):
+                    raise GuardError("invalid_json", "tasks JSON must be an object list or {\"tasks\": [...]}")
+            result = guard.sync_coordination(args.workspace_id, payload, args.tasks_file)
         else:
             result = {"cycles": guard.detect_cycles(args.workspace_id)}
     except GuardError as error:

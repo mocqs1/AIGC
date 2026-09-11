@@ -48,6 +48,8 @@ IMAGE_INPUT_BINDING = (
 )
 
 CLOTHING_PROVIDER = "hermes"
+CLOTHING_PROVIDERS = frozenset({"hermes", "hermes_volcano", "liblib"})
+
 
 _FORBIDDEN_PATTERNS = (
     r"\b(?:minor|child|children|kid|teen|teenager)\b",
@@ -134,8 +136,10 @@ def _load_workflow() -> dict[str, Any]:
     if (
         not isinstance(workflow, dict)
         or workflow.get("type") != "image"
-        or workflow.get("provider") != CLOTHING_PROVIDER
-        or workflow.get("provider_locked") is not True
+        or workflow.get("provider") not in CLOTHING_PROVIDERS
+        or workflow.get("provider_locked") is True
+        or not isinstance(workflow.get("providers"), list)
+        or set(workflow.get("providers") or ()) != {"hermes", "hermes_volcano"}
     ):
         raise RuntimeError(f"clothing image workflow must be an image object: {path}")
     return workflow
@@ -242,16 +246,17 @@ def generate_image(
     workflow = _load_workflow()
     provider_candidates = [
         candidate
-        for candidate in (options.pop("provider", None), body.get("provider"))
+        for candidate in (options.pop("provider", None), body.get("provider"), workflow.get("provider"))
         if candidate is not None
     ]
-    if any(
-        not isinstance(candidate, str)
-        or candidate.strip().lower() != CLOTHING_PROVIDER
-        for candidate in provider_candidates
-    ):
-        raise ClothingImageRequestError("clothing image-to-image requires the Hermes provider")
-    provider = CLOTHING_PROVIDER
+    selected = None
+    for candidate in provider_candidates:
+        if not isinstance(candidate, str) or candidate.strip().lower() not in CLOTHING_PROVIDERS:
+            raise ClothingImageRequestError("clothing image-to-image requires the Hermes or Hermes Volcano provider")
+        selected = "hermes_volcano" if candidate.strip().lower() == "liblib" else candidate.strip().lower()
+        break
+    provider = selected or CLOTHING_PROVIDER
+
     root = Path(output_dir) if output_dir is not None else OUTPUT_ROOT
     _write_prompt(prompt, root)
     path = engine_generate_image(
@@ -278,9 +283,11 @@ def generate_image(
 
 __all__ = [
     "CLOTHING_PROVIDER",
+    "CLOTHING_PROVIDERS",
     "IMAGE_INPUT_BINDING",
     "IMMUTABLE_GARMENT_CONTRACT",
     "ClothingImageRequestError",
     "build_prompt",
     "generate_image",
 ]
+

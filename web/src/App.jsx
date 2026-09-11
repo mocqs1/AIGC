@@ -252,7 +252,7 @@ const SHAPEWEAR_FORM_DEFAULTS = {
 
 const INITIAL_FORM = {
   ...GENERIC_IMAGE_DEFAULTS,
-  imageProvider: 'hermes',
+  imageProvider: '',
   outfitProvider: 'hermes',
   provider: 'veo',
   referenceKind: 'url',
@@ -406,6 +406,17 @@ function moduleIdForProvider(provider, modules = []) {
   if (MODULE_BY_PROVIDER[provider]) return MODULE_BY_PROVIDER[provider]
   return modules.some((item) => item.id === provider) ? provider : undefined
 }
+
+function availableImageProviders(providers = [], allowedProviders) {
+  return providers.filter((item) => item.media_types?.includes('image') && item.available && (!allowedProviders || allowedProviders.includes(item.id)))
+}
+
+function firstAvailableImageProvider(providers = [], current, allowedProviders) {
+  const available = availableImageProviders(providers, allowedProviders)
+  if (current && available.some((item) => item.id === current)) return current
+  return available[0]?.id || current || 'hermes'
+}
+
 
 function mixPlannerModule(modules = []) {
   const planners = modules.filter((item) => item.category === 'mix_planner' && item.enabled !== false && item.api_key_configured)
@@ -1245,9 +1256,10 @@ function FormPanel({ mode, form, providers, modules, modelCatalog, assets, loadi
             })}
           </div>}
         </section>}
-        {!isVideo && !isOutfitSwap && !isClothingImage && <section className="field-section"><ImageProviderPicker provider={form.imageProvider || 'hermes'} providers={providers} modules={modules} modelCatalog={modelCatalog} allowedProviders={isTikTokClothing ? ['hermes', 'hermes_volcano'] : undefined} onChange={(value) => onFieldChange('imageProvider', value)} /></section>}
+        {!isVideo && !isOutfitSwap && <section className="field-section"><ImageProviderPicker provider={form.imageProvider || 'hermes'} providers={providers} modules={modules} modelCatalog={modelCatalog} allowedProviders={(isTikTokClothing || isClothingImage || isShapewearImage) ? ['hermes', 'hermes_volcano'] : undefined} onChange={(value) => onFieldChange('imageProvider', value)} /></section>}
+
         {isOutfitSwap && <section className="field-section outfit-provider-section" aria-label="模特换装图片模型"><div className="section-heading-row"><div><h3>换装图片模型</h3><p>手动选择生成模型；素材顺序和服装细节锁定不变。</p></div><span className="technical-status is-passed">可切换</span></div><ImageProviderPicker provider={form.outfitProvider || 'hermes'} providers={providers} modules={modules} modelCatalog={modelCatalog} allowedProviders={['hermes', 'hermes_volcano']} label="生成模型" onChange={(value) => onFieldChange('outfitProvider', value)} /></section>}
-        {isClothingImage && <section className="field-section fixed-provider-section" aria-label="Hermes image provider"><div className="section-heading-row"><div><h3>Provider</h3><p>Hermes</p></div><span className="technical-status is-passed">Locked</span></div></section>}
+
         {isOutfitSwap && <OutfitSwapPicker form={form} assets={assets} onChange={onFieldChange} />}
          {isClothingImage && <ClothingReferencePicker form={form} assets={assets} onChange={onFieldChange} />}
          {isTikTokClothing && <TikTokClothingReferencePicker form={form} assets={assets} onChange={onFieldChange} />}
@@ -1265,7 +1277,8 @@ function FormPanel({ mode, form, providers, modules, modelCatalog, assets, loadi
         {error && <div className="form-error" role="alert"><CircleAlert size={17} />{error}</div>}
         <div className="form-actions">
           {!isOutfitSwap && <button type="button" className="secondary-button" onClick={onPreview} disabled={loading}><WandSparkles size={16} />预览 Prompt</button>}
-          {!isVideo && !isOutfitSwap && !isClothingImage && <button type="button" className="secondary-button" onClick={onBatch} disabled={loading || form.imageProvider !== 'hermes'}><Layers3 size={16} />批量生成</button>}
+          {!isVideo && !isOutfitSwap && !isClothingImage && <button type="button" className="secondary-button" onClick={onBatch} disabled={loading}><Layers3 size={16} />批量生成</button>}
+
           <button type="submit" className={classNames('primary-button', isOutfitSwap && 'outfit-generate-button')} disabled={loading || (isOutfitSwap && (!form.outfitModelImage || !form.outfitImages?.length)) || (isTikTokClothing && !tiktokHasMaster)}>
             {loading ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />}{loading ? '正在提交' : isOutfitSwap ? '开始换装' : '开始生成'}
           </button>
@@ -1414,6 +1427,22 @@ export default function App() {
     setActiveJob((current) => current ? jobData.jobs.find((job) => job.id === current.id) || current : jobData.jobs[0] || null)
   }, [])
 
+
+  useEffect(() => {
+    setForm((current) => {
+      const builtinImage = ['clothing_image_to_image', 'tiktok_clothing_image', 'shapewear_image'].includes(current.workflow)
+      const nextImage = firstAvailableImageProvider(providers, current.imageProvider, builtinImage ? ['hermes', 'hermes_volcano'] : undefined)
+      const nextOutfit = firstAvailableImageProvider(providers, current.outfitProvider, ['hermes', 'hermes_volcano'])
+      const videoProviders = providers.filter((item) => item.media_types?.includes('video') && item.available)
+      const nextVideo = (current.provider && videoProviders.some((item) => item.id === current.provider))
+        ? current.provider
+        : (videoProviders[0]?.id || current.provider)
+      if (nextImage === current.imageProvider && nextOutfit === current.outfitProvider && nextVideo === current.provider) return current
+      return { ...current, imageProvider: nextImage, outfitProvider: nextOutfit, provider: nextVideo }
+    })
+  }, [providers])
+
+
   useEffect(() => { refreshData().catch(() => setError('无法连接本地 AIGC Studio 服务。请先启动 API 服务。')) }, [refreshData])
   useEffect(() => {
     if (!activeJob || ['succeeded', 'failed'].includes(activeJob.status) || pollTimer.current) return undefined
@@ -1467,8 +1496,9 @@ export default function App() {
       setForm((current) => ({
         ...current,
          workflow: value,
-         imageProvider: 'hermes',
-         outfitProvider: current.outfitProvider || 'hermes',
+         imageProvider: current.imageProvider,
+         outfitProvider: current.outfitProvider,
+
         product: '',
         scene: '',
         style: '',
@@ -1487,7 +1517,8 @@ export default function App() {
       setForm((current) => ({
         ...current,
         workflow: value,
-        imageProvider: 'hermes',
+        imageProvider: current.imageProvider,
+
         product: '',
         scene: '',
         style: '',
@@ -1645,7 +1676,8 @@ export default function App() {
       return payload
     }
     if (workflow === 'clothing_image_to_image') {
-      const payload = { mode: workflow, provider: 'hermes', request: {
+      const payload = { mode: workflow, provider: form.imageProvider, request: {
+
         objective: 'Create a premium commercial clothing product image focused on craftsmanship, fabric texture, construction, and functional details.',
       } }
       const referenceImages = Array.isArray(form.referenceImages) ? form.referenceImages : []
@@ -1768,7 +1800,8 @@ export default function App() {
       image_asset_id: selected[index % selected.length] || null,
       reference_asset_ids: selected.filter((_, itemIndex) => itemIndex !== index % Math.max(1, selected.length)).slice(0, 16),
     }))
-    const created = await createGenerationBatch({ items, idempotency_key: idempotencyKey })
+    const created = await createGenerationBatch({ items, idempotency_key: idempotencyKey, provider: form.imageProvider })
+
     setBatchTask({ ...created, status: 'queued' })
     if (batchPollTimer.current) window.clearInterval(batchPollTimer.current)
     batchPollTimer.current = window.setInterval(async () => {
@@ -1778,7 +1811,8 @@ export default function App() {
         if (['succeeded', 'failed', 'partial'].includes(batch.status)) { window.clearInterval(batchPollTimer.current); batchPollTimer.current = null; fetchAssets().then((data) => setAssets(data.assets)).catch(() => {}) }
       } catch (pollError) { window.clearInterval(batchPollTimer.current); batchPollTimer.current = null; setBatchTask((current) => ({ ...current, status: 'failed', phase: pollError.message })) }
     }, 1800)
-  }, [])
+  }, [form.imageProvider])
+
 
   const handlePlanMix = useCallback(({ clips, objective, targetDuration, transitionMode }) => planMix({ clips, objective, target_duration_ms: targetDuration * 1000, transition_mode: transitionMode }), [])
 

@@ -28,6 +28,7 @@ DEFAULT_INTERVAL = 5.0
 DEFAULT_QUIET_SECONDS = 300.0
 DEFAULT_ROTATE_EVENT_COUNT = 900
 DEFAULT_ROTATE_TOKEN_ESTIMATE = 110000
+MAX_RECOVERY_PROMPTS = 2
 CONTEXT_CHECKPOINT_VERSION = "aigc-context-checkpoint/v1"
 
 
@@ -79,6 +80,15 @@ def _parse_time(value: Any) -> float | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+def _last_progress_at(run: Mapping[str, Any]) -> float | None:
+    last_progress = run.get("last_progress")
+    if isinstance(last_progress, Mapping):
+        parsed = _parse_time(last_progress.get("at"))
+        if parsed is not None:
+            return parsed
+    return _parse_time(run.get("last_progress_at"))
 
 
 def _safe_project_root(project_root: str | Path) -> Path:
@@ -392,6 +402,23 @@ class HerdrSupervisor:
 
     def _prompt_once(self, run: dict[str, Any], agent: Mapping[str, Any], reason: str) -> dict[str, Any]:
         task_id = str(run["task_id"])
+        prompts = int(run.get("supervisor_prompt_count", 0) or 0)
+        if prompts >= MAX_RECOVERY_PROMPTS:
+            action = {
+                "at": _now(),
+                "kind": "resume_prompt",
+                "task_id": task_id,
+                "owner": run.get("owner"),
+                "agent": agent.get("name"),
+                "reason": reason,
+                "result": "exhausted",
+            }
+            self._record_action(action)
+            run["last_supervisor_action_at"] = action["at"]
+            run["last_supervisor_action"] = action["kind"]
+            run["last_supervisor_result"] = action["result"]
+            self._persist_run(run)
+            return action
         generation = int(run.get("supervisor_generation", 0)) + 1
         nonce = f"{task_id}:{generation}:{uuid.uuid4().hex[:12]}"
         action = {"at": _now(), "kind": "resume_prompt", "task_id": task_id, "owner": run.get("owner"), "agent": agent.get("name"), "nonce": nonce, "reason": reason}
@@ -406,6 +433,8 @@ class HerdrSupervisor:
         action["result"] = "submitted" if result.returncode == 0 else "failed"
         self._record_action(action)
         run["supervisor_generation"] = generation
+        if action["result"] == "submitted":
+            run["supervisor_prompt_count"] = prompts + 1
         run["last_supervisor_action_at"] = action["at"]
         run["last_supervisor_action"] = action["kind"]
         run["last_supervisor_result"] = action["result"]
@@ -450,7 +479,11 @@ class HerdrSupervisor:
                 report["findings"].append({"task_id": run.get("task_id"), "code": "agent_missing"})
                 continue
             agent_status = agent.get("agent_status")
+            progress_at = _last_progress_at(run)
             last_action_at = _parse_time(run.get("last_supervisor_action_at"))
+            if progress_at is not None and last_action_at is not None and progress_at > last_action_at:
+                run["supervisor_prompt_count"] = 0
+                self._persist_run(run)
             if agent_status in RECOVERABLE_AGENT_STATES and (last_action_at is None or now - last_action_at >= self.quiet_seconds):
                 report["actions"].append(self._prompt_once(run, agent, f"agent_{agent_status}"))
             usage = self._session_usage(agent)
@@ -482,11 +515,25 @@ class HerdrSupervisor:
             elif due and rotation.get("state") not in {"completed"}:
                 report["actions"].append(self._rotate_context_once(run, agent, event_count, token_estimate))
 
-            progress_at = _parse_time(run.get("last_progress_at"))
             if progress_at is not None and now - progress_at >= self.quiet_seconds and agent_status == "working":
                 report["findings"].append({"task_id": run.get("task_id"), "code": "progress_quiet", "seconds": int(now - progress_at)})
         _write_json(self.status_path, report)
         return report
+
+    def status(self) -> dict[str, Any]:
+        if self.status_path.is_file():
+            payload = _read_json(self.status_path, None)
+            if isinstance(payload, dict):
+                return payload
+        return {
+            "version": 1,
+            "generated_at": _now(),
+            "project_root": str(self.project_root).replace("\\", "/"),
+            "mode": "idle",
+            "actions": [],
+            "findings": [],
+            "agents": [],
+        }
 
     def run_forever(self) -> int:
         if not self.lock.acquire():

@@ -39,6 +39,8 @@ try {
             Write-Output (ConvertTo-Json ([ordered]@{ ok = $true; started = $true; pid = $process.Id; stateDir = $stateDir }) -Compress)
         }
         "status" { Invoke-Supervisor @("status") }
+        "reconcile" { Invoke-Supervisor @("reconcile") }
+        "event" { Invoke-Supervisor @("reconcile") }
         "stop" {
             $processes = @(Get-CimInstance Win32_Process | Where-Object {
                 $_.Name -eq "python.exe" -and $_.CommandLine -match "-m harness\.supervisor" -and $_.CommandLine -match [regex]::Escape($projectRoot)

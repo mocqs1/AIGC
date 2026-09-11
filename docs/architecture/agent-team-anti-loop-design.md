@@ -348,6 +348,92 @@ Every run also needs a wall-clock deadline appropriate to the request. A budget
 increase is a lead decision with a stated new hypothesis and must be recorded;
 it cannot be an automatic rollover.
 
+## Operating contract
+
+The implemented guard already owns admission, retries, cycles, and pause/resume.
+These remaining bindings keep a live team from looping around that guard.
+
+### Dual ledger
+
+There are two ledgers. They are not interchangeable.
+
+| Ledger | Path | Owns |
+| --- | --- | --- |
+| Anti-loop run | `.agents/runtime/herdr-anti-loop/` | Action budgets, retries, progress, dependency cycles, `paused`/`resume` |
+| HERDR coordination | `.agents/coordination/` | Display identity, dispatch targets, watchdog/audit, session rotation display |
+
+`scripts/herdr-control.ps1` remains the display/control wrapper. After a
+successful `init`, `task create`, `task transition`, or `task archive`, the
+wrapper runs `python -m harness.anti_loop sync` against
+`.agents/coordination/tasks.json`. A coordination `progress` note is not
+anti-loop progress; only `python -m harness.anti_loop finish --progress yes`
+with an evidence hash resets the no-progress counter.
+
+Coordination task IDs stay `^[A-Z][A-Z0-9_-]{2,63}$`. The matching anti-loop
+`task_id` is the same string. `SAFE_ID` already accepts that alphabet.
+
+### Mandatory root run
+
+Every live four-agent session starts one root run before workers receive work:
+
+| Field | Value |
+| --- | --- |
+| `task_id` | `TEAM-ROOT` |
+| `owner` | `aigc-lead-codex` |
+| `workspace_id` | `HERDR_WORKSPACE_ID`, else `workspace-local` |
+| `objective` | keep the team on one bounded user request |
+| `acceptance` | named subtasks are terminal or paused with a Lead escalation |
+| `budget` | root-team defaults: 60/40/16/2/3/2 |
+
+Workers do not start sibling root runs. Lead creates one child run per
+handoff, with a different owner, objective, or acceptance criterion. The child
+`task_id` is the coordination task ID.
+
+### Role protocol
+
+| Role | Must | Must not |
+| --- | --- | --- |
+| Lead | `start` the root run; `admit` every dispatch/resume; `resume` paused runs; `complete` only with acceptance evidence | prompt workers without an admitted action; raise budgets silently |
+| Build | `admit` one implementation action; `finish` with artifact/test evidence; report `paused` to Lead | retry a permanent error; wait without a named child-run deadline |
+| Product | `admit` one research action; cite source, date, geography, confidence | authorize production truth; reopen the same question without new evidence |
+| Quality | `admit` review with `finding_id`; reopen once with new evidence | patch source unless Lead assigns a fix; loop a second disagreement |
+
+Lead `admit` action types for team work:
+
+| `action_type` | `target` | Expected progress |
+| --- | --- | --- |
+| `delegation` | worker agent id | child run exists and is `ready` or `waiting` |
+| `review` | `aigc-quality-omp` plus `finding_id` | finding accepted, fixed, or escalated |
+| `tool` | named local command or provider | artifact, checkpoint, or classified failure |
+
+A worker that cannot name `expected_progress` returns `paused` instead of
+searching or editing again.
+
+### Context rotation
+
+Supervisor rotation at 900 events or 110,000 estimated tokens is an early
+handoff. It writes a durable checkpoint and starts a fresh pane; it does not
+reset anti-loop counters or grant a new action budget.
+
+HERDR watchdog/audit at 1,500 events or 170,000 estimated tokens is the hard
+stop: checkpoint and clean-context takeover. Two `tool_schema_*` errors still
+require that takeover. The new session resumes the same anti-loop `task_id`
+from the checkpoint; it does not create a second root run.
+
+### Startup sequence
+
+1. `scripts/herdr-control.ps1 init` (creates the coordination root and syncs)
+2. `python -m harness.anti_loop bootstrap --workspace-id ...` (idempotent `TEAM-ROOT`)
+3. Create coordination `TEAM-ROOT` if missing; ignore `already exists`
+4. Prompt Lead with the root-run contract
+5. Split worker panes and prompt all four agents with the shared guard contract
+6. Start `aigc.supervisor` if it is not already running
+
+Do not `admit` during pane bootstrap. A duplicate in-flight `admit` would fail
+a second `start-team` in the same workspace. Lead admits the first real
+dispatch after workers exist. If step 2 fails, abort pane split. A team
+without `TEAM-ROOT` is an unbounded session.
+
 ## Implementation outline
 
 1. Add a coordinator-owned `AgentRunStore` beside the existing atomic harness
@@ -396,6 +482,16 @@ it cannot be an automatic rollover.
   `interrupted_job` instead of resubmitting.
 - [x] Ledger and escalation evidence exclude secrets, raw provider responses,
   local source paths, commands, and unbounded model transcripts.
+
+- [x] `start-team.ps1` bootstraps one `TEAM-ROOT` run, prompts Lead plus the
+  three workers, and starts the supervisor without admitting a startup action.
+- [x] `scripts/herdr-control.ps1` mirrors coordination create/transition/
+  archive into the anti-loop ledger; `progress` and `error` do not.
+- [x] `bootstrap`/`ensure` reuse an existing run; `start` still rejects a
+  different immutable fingerprint.
+- [x] Coordination `accepted`/`failed`/`cancelled` complete or fail the
+  matching anti-loop run; a paused run that cannot complete is recorded in
+  `skipped` rather than retried.
 
 ## Risks and operating notes
 

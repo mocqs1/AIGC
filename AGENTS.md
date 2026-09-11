@@ -46,8 +46,8 @@ layer with source path, date, confidence, and unresolved risks. Do not modify
 
 ## Shared Herdr Coordination
 
-- Use scripts/herdr-control.ps1 from the AIGC root for task identity, bounded progress, checkpoints, watchdog diagnostics, session audits, and dispatch validation.
+- Use scripts/herdr-control.ps1 from the AIGC root for task identity, bounded progress, checkpoints, watchdog diagnostics, session audits, and dispatch validation. Task create/transition/archive also mirrors `.agents/coordination/tasks.json` into the anti-loop ledger.
 - The shared guard rejects workspace drift, placeholder wait IDs, missing collaboration targets, stale progress, and repeated schema failures.
-- Rotate a lead context at 1,500 events or 170,000 estimated tokens; two tool_schema_* errors require a checkpoint and clean-context takeover.
-- The AIGC anti-loop guard and its local runtime state remain authoritative for action budgets, retries, and dependency cycles; HERDR/HACP is delivery and display only.
+- Rotate a lead context at 1,500 events or 170,000 estimated tokens; two tool_schema_* errors require a checkpoint and clean-context takeover. Supervisor early handoff is 900 events or 110,000 estimated tokens and does not reset anti-loop budgets.
+- The AIGC anti-loop guard and its local runtime state remain authoritative for action budgets, retries, and dependency cycles; HERDR/HACP is delivery and display only. Live sessions start one `TEAM-ROOT` run owned by `aigc-lead-codex`. Lead admits every dispatch/resume through `python -m harness.anti_loop`; workers take one child run each. Coordination `progress` notes are not anti-loop progress.
 - Never place secrets, raw session content, customer data, or provider payloads in coordination state.

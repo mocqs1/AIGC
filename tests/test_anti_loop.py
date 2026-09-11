@@ -44,6 +44,27 @@ class AntiLoopGuardTests(unittest.TestCase):
         )
         self.assertEqual(retry["sequence"], 2)
 
+    def test_unknown_outcome_allows_only_one_diagnostic(self):
+        self.start()
+        first = self.guard.admit("task-a", "tool", "provider", {"job": "one"}, "remote job state")
+        self.guard.finish("task-a", first["sequence"], "unknown", False)
+        with self.assertRaisesRegex(GuardError, "unknown outcome allows only one diagnostic"):
+            self.guard.admit("task-a", "tool", "provider", {"job": "one"}, "remote job state", "one more probe")
+        self.assertEqual(self.guard.status("workspace-a")[0]["blocker"]["reason_code"], "unknown_unresolved")
+
+    def test_resume_resets_no_progress_counter(self):
+        self.start()
+        first = self.guard.admit("task-a", "tool", "diagnostic-a", {}, "new evidence")
+        self.guard.finish("task-a", first["sequence"], "succeeded", False)
+        second = self.guard.admit("task-a", "tool", "diagnostic-b", {}, "new evidence")
+        self.guard.finish("task-a", second["sequence"], "succeeded", False)
+        resumed = self.guard.resume("task-a", "Lead grants a bounded retry with a changed probe")
+        self.assertEqual(resumed["counters"]["consecutive_no_progress"], 0)
+        third = self.guard.admit("task-a", "tool", "diagnostic-c", {}, "new evidence")
+        result = self.guard.finish("task-a", third["sequence"], "succeeded", False)
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(result["counters"]["consecutive_no_progress"], 1)
+
     def test_two_no_progress_attempts_pause_the_run(self):
         self.start()
         first = self.guard.admit("task-a", "tool", "diagnostic-a", {}, "new evidence")
@@ -147,6 +168,88 @@ class AntiLoopGuardTests(unittest.TestCase):
             self.guard.admit("task-a", "tool", "probe", {}, "state")
         self.assertEqual(self.guard.status("workspace-a")[0]["blocker"]["reason_code"], "deadline_exceeded")
 
+    def test_bootstrap_and_ensure_reuse_existing_run(self):
+        first = self.guard.bootstrap("workspace-a")
+        second = self.guard.bootstrap("workspace-a")
+        self.assertEqual(first["task_id"], "TEAM-ROOT")
+        self.assertEqual(second["task_id"], first["task_id"])
+        self.assertEqual(len(self.guard.status("workspace-a")), 1)
+        reused = self.guard.ensure(
+            "TEAM-ROOT",
+            "workspace-a",
+            "aigc-build-codex",
+            "different objective",
+            "different acceptance",
+            {"request": "changed"},
+        )
+        self.assertEqual(reused["objective"], first["objective"])
+        self.assertEqual(reused["input_fingerprint"], first["input_fingerprint"])
+        with self.assertRaisesRegex(GuardError, "different immutable input"):
+            self.guard.start(
+                "TEAM-ROOT",
+                "workspace-a",
+                "aigc-build-codex",
+                "different objective",
+                "different acceptance",
+                {"request": "changed"},
+            )
+
+    def test_fail_is_idempotent_and_rejects_other_terminal_states(self):
+        self.start()
+        first = self.guard.fail("task-a", "provider unavailable")
+        second = self.guard.fail("task-a", "provider unavailable")
+        self.assertEqual(first["state"], "failed")
+        self.assertEqual(second["state"], "failed")
+        self.start(task_id="task-b")
+        self.guard.complete("task-b")
+        with self.assertRaisesRegex(GuardError, "task is already terminal"):
+            self.guard.fail("task-b", "too late")
+        self.start(task_id="task-c")
+        self.guard.admit("task-c", "tool", "provider", {"job": "one"}, "remote job state")
+        blocked = self.guard.finish("task-c", 1, "permission_or_policy", False)
+        self.assertEqual(blocked["state"], "blocked")
+        with self.assertRaisesRegex(GuardError, "task is already terminal"):
+            self.guard.fail("task-c", "too late")
+
+    def test_sync_mirrors_terminal_coordination_and_skips_paused(self):
+        root = self.guard.bootstrap("workspace-a")
+        self.assertEqual(root["state"], "ready")
+        paused = self.start(task_id="TASK-PAUSED")
+        first = self.guard.admit("TASK-PAUSED", "tool", "provider", {"job": "one"}, "remote job state")
+        self.guard.finish("TASK-PAUSED", first["sequence"], "transient", False)
+        self.guard.admit(
+            "TASK-PAUSED",
+            "tool",
+            "provider",
+            {"job": "one"},
+            "remote job state",
+            "provider backoff elapsed",
+        )
+        self.guard.finish("TASK-PAUSED", 2, "transient", False)
+        self.assertEqual(self.guard.store.load("TASK-PAUSED")["state"], "paused")
+        result = self.guard.sync_coordination(
+            "workspace-a",
+            [
+                {"id": "TEAM-ROOT", "owner": "aigc-lead-codex", "status": "planned"},
+                {
+                    "id": "TASK-DONE",
+                    "owner": "aigc-build-codex",
+                    "status": "accepted",
+                    "acceptanceCriteria": ["tests pass"],
+                },
+                {"id": "TASK-FAIL", "owner": "aigc-build-codex", "status": "failed"},
+                {"id": "TASK-PAUSED", "owner": "aigc-build-codex", "status": "accepted"},
+            ],
+        )
+        self.assertEqual(result["root"]["task_id"], "TEAM-ROOT")
+        states = {item["task_id"]: item["state"] for item in result["mirrored"]}
+        self.assertEqual(states["TEAM-ROOT"], "ready")
+        self.assertEqual(states["TASK-DONE"], "completed")
+        self.assertEqual(states["TASK-FAIL"], "failed")
+        self.assertEqual(states["TASK-PAUSED"], "paused")
+        self.assertEqual(result["skipped"][0]["task_id"], "TASK-PAUSED")
+        self.assertEqual(result["skipped"][0]["code"], "paused")
+        self.assertEqual(paused["task_id"], "TASK-PAUSED")
 
 if __name__ == "__main__":
     unittest.main()

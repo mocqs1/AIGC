@@ -102,7 +102,9 @@
       "display_name": "Clothing Image to Image",
       "skill_file": "skills/clothing-image-to-image/SKILL.md",
       "provider": "hermes",
-      "provider_locked": true,
+      "provider_locked": false,
+      "providers": ["hermes", "hermes_volcano"],
+
       "triggers": [
         "服装图生图",
         "服装工艺图",
